@@ -83,7 +83,7 @@ impl StandardTool for DbRestoreTool {
             },
             "db_host": {
                 "type": "string",
-                "description": "Database host (default: localhost)"
+                "description": "Database host (default: localhost): a host name or IP address (letters, digits and . - _ : % only, at most 253 bytes) or, for PostgreSQL, /var/run/postgresql or /run/postgresql. The stored database credentials of the SSH host (option files, password files, environment) apply only when db_host is localhost, a loopback address or, for PostgreSQL, /var/run/postgresql or /run/postgresql; any other server needs db_password."
             },
             "db_port": {
                 "type": "integer",
@@ -95,7 +95,7 @@ impl StandardTool for DbRestoreTool {
             },
             "db_password": {
                 "type": "string",
-                "description": "Database password"
+                "description": "Database password. Required unless db_host is localhost, a loopback address or, for PostgreSQL, /var/run/postgresql or /run/postgresql, where the stored credentials of the SSH host apply when it is omitted. At most 1024 bytes."
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -433,6 +433,194 @@ mod tests {
         match result.unwrap_err() {
             BridgeError::CommandDenied { reason } => assert!(reason.contains("'database'")),
             e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    use crate::config::{HostKeyVerification, OsType};
+
+    fn test_host_config() -> HostConfig {
+        HostConfig {
+            hostname: "test".to_string(),
+            port: 22,
+            user: "test".to_string(),
+            auth: crate::config::AuthConfig::Agent,
+            description: None,
+            host_key_verification: HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: OsType::default(),
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+        }
+    }
+
+    // ============== Stored credentials stay on the local server ==============
+
+    /// Arguments of a valid call, with `extra` merged in.
+    fn args_with(db_type: &str, extra: &serde_json::Value) -> serde_json::Value {
+        let mut value = json!({
+            "host": "server1",
+            "db_type": db_type,
+            "database": "db",
+            "input_file": "/tmp/i.sql",
+        });
+        if let (Some(map), Some(more)) = (value.as_object_mut(), extra.as_object()) {
+            map.extend(more.clone());
+        }
+        value
+    }
+
+    #[tokio::test]
+    async fn test_refuses_other_server_without_password() {
+        let handler = SshDbRestoreHandler::new();
+        let ctx = create_test_context_with_host();
+        for db_type in ["mysql", "postgresql"] {
+            for extra in [
+                json!({"db_host": "db.example.com"}),
+                json!({"db_host": "10.0.0.5", "db_password": ""}),
+                json!({"db_host": "127.1"}),
+            ] {
+                let result = handler
+                    .execute(Some(args_with(db_type, &extra)), &ctx)
+                    .await;
+                match result.unwrap_err() {
+                    BridgeError::CommandDenied { reason } => {
+                        assert!(reason.contains("'db_host'"), "{reason}");
+                        assert!(reason.contains("'db_password'"), "{reason}");
+                    }
+                    e => panic!("Expected CommandDenied for {extra}, got: {e:?}"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_malformed_db_host() {
+        let handler = SshDbRestoreHandler::new();
+        let ctx = create_test_context_with_host();
+        for db_host in ["", "localhost,evil", "a@b", "host=x", "a b", "[::1]"] {
+            let extra = json!({"db_host": db_host, "db_password": "pw"});
+            let result = handler
+                .execute(Some(args_with("postgresql", &extra)), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("'db_host'"), "{db_host:?}: {reason}");
+                }
+                e => panic!("Expected CommandDenied for {db_host:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_other_server_with_password_is_accepted_and_isolated() {
+        let host_config = test_host_config();
+        let mysql: SshDbRestoreArgs = serde_json::from_value(args_with(
+            "mysql",
+            &json!({"db_host": "db.example.com", "db_password": "pw"}),
+        ))
+        .expect("deserialize");
+        DbRestoreTool::validate(&mysql, &host_config).expect("accepted with a password");
+        let cmd = DbRestoreTool::build_command(&mysql, &host_config).unwrap();
+        assert!(cmd.starts_with("unset MYSQL_PWD && "), "{cmd}");
+        assert!(
+            cmd.contains("HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null "),
+            "{cmd}"
+        );
+
+        let pg: SshDbRestoreArgs = serde_json::from_value(args_with(
+            "postgresql",
+            &json!({"db_host": "db.example.com", "db_password": "pw"}),
+        ))
+        .expect("deserialize");
+        DbRestoreTool::validate(&pg, &host_config).expect("accepted with a password");
+        let cmd = DbRestoreTool::build_command(&pg, &host_config).unwrap();
+        assert!(
+            cmd.starts_with("unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && "),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("PGPASSFILE=$TMPF PGSSLCERT=/nonexistent psql -w -h "),
+            "{cmd}"
+        );
+    }
+
+    #[test]
+    fn test_local_db_host_needs_no_password() {
+        let host_config = test_host_config();
+        for db_type in ["mysql", "postgresql"] {
+            for extra in [
+                json!({}),
+                json!({"db_host": "localhost"}),
+                json!({"db_host": "127.0.0.1"}),
+                json!({"db_host": "::1"}),
+            ] {
+                let args: SshDbRestoreArgs =
+                    serde_json::from_value(args_with(db_type, &extra)).expect("deserialize");
+                DbRestoreTool::validate(&args, &host_config)
+                    .unwrap_or_else(|e| panic!("{db_type} {extra}: {e:?}"));
+                let cmd = DbRestoreTool::build_command(&args, &host_config).unwrap();
+                assert!(!cmd.contains("unset "), "{cmd}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_other_postgres_server_with_empty_database_or_user() {
+        let handler = SshDbRestoreHandler::new();
+        let ctx = create_test_context_with_host();
+        for (arg, extra) in [
+            (
+                "database",
+                json!({"db_host": "db.example.com", "db_password": "pw", "database": ""}),
+            ),
+            (
+                "db_user",
+                json!({"db_host": "db.example.com", "db_password": "pw", "db_user": ""}),
+            ),
+        ] {
+            let result = handler
+                .execute(Some(args_with("postgresql", &extra)), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains(arg), "{arg}: {reason}");
+                }
+                e => panic!("Expected CommandDenied for {extra}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_an_over_long_db_password() {
+        let handler = SshDbRestoreHandler::new();
+        let ctx = create_test_context_with_host();
+        let extra = json!({"db_password": "p".repeat(1025)});
+        for db_type in ["mysql", "postgresql"] {
+            let result = handler
+                .execute(Some(args_with(db_type, &extra)), &ctx)
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("'db_password'"), "{reason}");
+                }
+                e => panic!("Expected CommandDenied for {db_type}, got: {e:?}"),
+            }
         }
     }
 }

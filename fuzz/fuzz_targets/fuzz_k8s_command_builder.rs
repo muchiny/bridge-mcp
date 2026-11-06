@@ -25,8 +25,30 @@ use bridge_mcp::KubernetesCommandBuilder;
 // Run with the dictionary or this explores very little:
 // `cargo +nightly fuzz run fuzz_k8s_command_builder -- -dict=fuzz/dicts/shell.dict`
 
+/// Oracle for one element of `--address`, written WITHOUT `is_loopback_host`,
+/// `to_canonical` or `is_loopback`: exactly `localhost` (lower case, as
+/// `client-go` `parseAddresses` compares it), an `IPv4` address whose first
+/// octet is 127, `::1`, or `::ffff:127.x.y.z`, the last two read from the
+/// parsed segments. Anything else, `LOCALHOST` included, is not loopback.
+fn oracle_loopback_element(element: &str) -> bool {
+    if element == "localhost" {
+        return true;
+    }
+    if let Ok(v4) = element.parse::<std::net::Ipv4Addr>() {
+        return v4.octets().first() == Some(&127);
+    }
+    if let Ok(v6) = element.parse::<std::net::Ipv6Addr>() {
+        return match v6.segments() {
+            [0, 0, 0, 0, 0, 0, 0, 1] => true,
+            [0, 0, 0, 0, 0, 0xffff, high, _] => high >> 8 == 127,
+            _ => false,
+        };
+    }
+    false
+}
+
 fuzz_target!(|data: &str| {
-    // Fuzz all 9 KubernetesCommandBuilder methods with arbitrary strings.
+    // Fuzz 12 KubernetesCommandBuilder entry points with arbitrary strings.
     // Invariant: output must always contain the kubectl detection prefix
     // and must never panic.
 
@@ -147,6 +169,64 @@ fuzz_target!(|data: &str| {
         true,       // containers
     );
     assert_arrives_as_text(&cmd, data, "top");
+
+    // 10. build_port_forward_command: the value reaches the command as text,
+    // and the probe `curl` never reads the host's `~/.curlrc`.
+    if let Ok(cmd) = KubernetesCommandBuilder::build_port_forward_command(
+        Some("kubectl"),
+        "svc/web",
+        "8080:80",
+        Some(data),   // probe_path
+        5,
+        Some(data),   // namespace
+        None,
+        Some(data),   // context
+    ) {
+        assert_arrives_as_text(&cmd, data, "port_forward");
+        assert!(cmd.contains(" curl -q -sS -m 5 "), "probe curl without -q: {cmd:?}");
+        assert!(!cmd.contains(" curl -sS"), "probe curl without -q: {cmd:?}");
+    }
+
+    // 11. `address` (kubectl port-forward --address) is accepted if and only
+    // if it is a non-empty comma list of loopback hosts. The oracle
+    // (`oracle_loopback_element`) shares no code with `is_loopback_host`: it
+    // compares the exact string `localhost` and reads the parsed octets or
+    // segments, so a drift in either fails here. `Ipv4Addr`/`Ipv6Addr`
+    // parsing is the one thing both sides rely on.
+    let loopback_list = !data.is_empty() && data.split(',').all(oracle_loopback_element);
+    let result = KubernetesCommandBuilder::build_port_forward_command(
+        Some("kubectl"),
+        "svc/web",
+        "8080:80",
+        Some("/healthz"),
+        5,
+        None,
+        Some(data),   // address
+        None,
+    );
+    assert_eq!(
+        result.is_ok(),
+        loopback_list,
+        "address {data:?}: accepted={} but loopback list={loopback_list}",
+        result.is_ok()
+    );
+    if let Ok(cmd) = result {
+        assert_arrives_as_text(&cmd, data, "port_forward address");
+    }
+
+    // 12. build_traefik_introspect_command: same two properties.
+    if let Ok(cmd) = KubernetesCommandBuilder::build_traefik_introspect_command(
+        Some("kubectl"),
+        data,         // api_path
+        Some(data),   // namespace
+        8080,
+        5,
+        Some(data),   // context
+    ) {
+        assert_arrives_as_text(&cmd, data, "traefik_introspect");
+        assert!(cmd.contains(" curl -q -sS -m 8 "), "curl without -q: {cmd:?}");
+        assert!(!cmd.contains(" curl -sS"), "curl without -q: {cmd:?}");
+    }
 
     // Also test with auto-detect (None kubectl_bin)
     let cmd = KubernetesCommandBuilder::build_get_command(

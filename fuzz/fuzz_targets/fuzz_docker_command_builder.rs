@@ -1,7 +1,9 @@
 #![no_main]
 use bridge_mcp_fuzz::assert_arrives_as_text;
 use libfuzzer_sys::fuzz_target;
+use bridge_mcp::config::ShellType;
 use bridge_mcp::domain::use_cases::docker::DockerCommandBuilder;
+use bridge_mcp::domain::use_cases::shell;
 
 // This target used to assert only the PROGRAM NAME: `assert!(cmd.contains(
 // "the program name"))`. That is a string the builder writes itself, in every branch,
@@ -23,6 +25,25 @@ use bridge_mcp::domain::use_cases::docker::DockerCommandBuilder;
 //
 // Run with the dictionary or this explores very little:
 // `cargo +nightly fuzz run fuzz_docker_command_builder -- -dict=fuzz/dicts/shell.dict`
+
+// A compose file on the host may itself name a Git or OCI resource (`include:`);
+// loading one runs the host's Git or registry client with the host's own credential
+// sources. Whatever the arguments, the command must carry both switches as shell
+// prefix assignments directly in front of the compose program, right after the
+// `cd -- DIR && `, so that they bind to the one command that runs compose. `dir` is
+// the project directory the builder was given; the head is built from it, not
+// searched for, so a directory that spells the switches cannot satisfy the check.
+fn assert_compose_remote_loaders_off(cmd: &str, dir: &str) {
+    let head = format!(
+        "cd -- {} && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+         COMPOSE_EXPERIMENTAL_OCI_REMOTE=false ",
+        shell::escape(dir, ShellType::Posix)
+    );
+    assert!(
+        cmd.starts_with(&head),
+        "compose command does not start with the cd and both remote loader switches: {cmd:?}"
+    );
+}
 
 fuzz_target!(|data: &str| {
     let env = vec![data.to_string()];
@@ -85,6 +106,7 @@ fuzz_target!(|data: &str| {
         Some(60),
     );
     assert_arrives_as_text(&cmd, data, "compose");
+    assert_compose_remote_loaders_off(&cmd, data);
 
     // volume ls
     let cmd =
@@ -108,4 +130,40 @@ fuzz_target!(|data: &str| {
 
     // validate_compose_action
     let _ = DockerCommandBuilder::validate_compose_action(data);
+
+    // validate_compose_path: whatever it ACCEPTS is a local path. Nothing a
+    // compose client reads as a remote resource (a scheme, `host:path`,
+    // `user@host`, standard input, a `github.com/...` path that compose may read
+    // as a Git reference) may get through, whatever the input. Refusal is always
+    // fine.
+    if DockerCommandBuilder::validate_compose_path("file", data).is_ok() {
+        assert!(
+            !data.is_empty()
+                && !data.starts_with('-')
+                && data
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-')),
+            "compose path accepted with a character outside [A-Za-z0-9/._-]: {data:?}"
+        );
+        assert!(
+            data.starts_with('/')
+                || data.starts_with("./")
+                || data.starts_with("../")
+                || !data.contains('/'),
+            "compose path accepted with a host-like first segment: {data:?}"
+        );
+        // An accepted path still arrives as one quoted word.
+        let cmd = DockerCommandBuilder::build_compose_command(
+            Some("docker compose"),
+            "up",
+            "/opt/app",
+            Some(data),
+            None,
+            true,
+            false,
+            None,
+        );
+        assert_arrives_as_text(&cmd, data, "compose_file");
+        assert_compose_remote_loaders_off(&cmd, "/opt/app");
+    }
 });

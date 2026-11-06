@@ -44,7 +44,11 @@ impl StandardTool for PodmanComposeTool {
         'logs --tail 100', 'restart', 'pull'): a subcommand, then only its known flags and \
         service names, separated by spaces, no quoting. Output files, env files and \
         'logs -f' are refused. Can remove containers and volumes (down -v, rm). Specify file if the compose file is not the default \
-        (compose.yaml or docker-compose.yml in the working directory). For viewing individual \
+        (compose.yaml or docker-compose.yml in the working directory); file is a local path on \
+        the host (letters, digits, '/', '.', '_', '-'; a relative path with a directory part \
+        starts with './'): URLs, Git and OCI references and 'host:path' forms are refused. \
+        Remote Git and OCI includes named inside a compose file are not loaded (the compose \
+        remote loaders are switched off). For viewing individual \
         container logs use ssh_podman_logs. For Docker Compose stacks use ssh_docker_compose \
         instead.";
 
@@ -61,7 +65,7 @@ impl StandardTool for PodmanComposeTool {
             },
             "file": {
                 "type": "string",
-                "description": "Path to compose file (default: compose.yaml or docker-compose.yml in current directory)"
+                "description": "Local path of the compose file on the remote host, made of letters, digits, '/', '.', '_' and '-' (absolute, or relative to the working directory; a relative path with a directory part starts with './'). URLs, Git/OCI references and 'host:path' forms are refused. Default: compose.yaml or docker-compose.yml in current directory"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -83,7 +87,11 @@ impl StandardTool for PodmanComposeTool {
     }"#;
 
     fn validate(args: &SshPodmanComposeArgs, _host_config: &HostConfig) -> Result<()> {
-        PodmanCommandBuilder::validate_compose_action(&args.action)
+        PodmanCommandBuilder::validate_compose_action(&args.action)?;
+        if let Some(file) = &args.file {
+            PodmanCommandBuilder::validate_compose_file(file)?;
+        }
+        Ok(())
     }
 
     fn build_command(args: &SshPodmanComposeArgs, _host_config: &HostConfig) -> Result<String> {
@@ -406,6 +414,72 @@ mod tests {
         let args: SshPodmanComposeArgs =
             serde_json::from_value(json!({"host": "s", "action": "up -d"})).unwrap();
         let cmd = PodmanComposeTool::build_command(&args, &test_host_config()).unwrap();
-        assert_eq!(cmd, "podman compose 'up' '-d'");
+        assert_eq!(
+            cmd,
+            "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false \
+             podman compose 'up' '-d'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remote_compose_file_is_refused() {
+        for file in [
+            "https://example.com/org/repo.git",
+            "git@example.com:org/repo.git",
+            "oci://registry.example.com/stack:latest",
+            "github.com/org/repo",
+            "example.com:compose.yml",
+            "-",
+            "",
+        ] {
+            let handler = SshPodmanComposeHandler::new();
+            let ctx = crate::ports::mock::create_test_context_with_host();
+            let args = json!({"host": "server1", "action": "up -d", "file": file});
+            let err = handler.execute(Some(args), &ctx).await.unwrap_err();
+            let BridgeError::CommandDenied { reason } = &err else {
+                panic!("{file:?}: {err:?}");
+            };
+            assert!(reason.contains("'file'"), "{file:?}: {reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_local_compose_file_still_runs() {
+        let handler = SshPodmanComposeHandler::new();
+        let ctx = permissive_ctx(mock_output("ok"));
+        let args = json!({"host": "server1", "action": "up -d", "file": "./deploy/compose.yml"});
+        let result = handler.execute(Some(args), &ctx).await.unwrap();
+        assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[test]
+    fn test_build_command_golden_with_file() {
+        for (file, want) in [
+            (
+                "docker-compose.prod.yml",
+                "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false \
+                 podman compose -f 'docker-compose.prod.yml' 'up' '-d'",
+            ),
+            (
+                "/srv/stack/compose.yaml",
+                "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false \
+                 podman compose -f '/srv/stack/compose.yaml' 'up' '-d'",
+            ),
+            (
+                "./deploy/compose.yml",
+                "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false \
+                 podman compose -f './deploy/compose.yml' 'up' '-d'",
+            ),
+        ] {
+            let args: SshPodmanComposeArgs =
+                serde_json::from_value(json!({"host": "s", "action": "up -d", "file": file}))
+                    .unwrap();
+            let host = test_host_config();
+            assert!(PodmanComposeTool::validate(&args, &host).is_ok(), "{file}");
+            assert_eq!(
+                PodmanComposeTool::build_command(&args, &host).unwrap(),
+                want
+            );
+        }
     }
 }

@@ -520,9 +520,62 @@ pub fn refuse_option_like(arg: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `host` designates the machine the command runs on: exactly
+/// `localhost` (ASCII case-insensitive) or an IP address (no brackets, no
+/// port) that is a loopback address once canonicalised (`127.0.0.0/8`, `::1`,
+/// and `::ffff:127.x` mapped to `IPv4`).
+///
+/// Everything else is another machine: other names (a `DNS` name can point
+/// anywhere), short forms such as `127.1`, `0.0.0.0`, `[::1]`, `::1%lo`.
+/// Used by the tools whose client program presents a credential of the target
+/// host: that credential may only go to a local server.
+#[must_use]
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== is_loopback_host =====
+
+    #[test]
+    fn test_is_loopback_host() {
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "LocalHost",
+            "127.0.0.1",
+            "127.0.0.2",
+            "127.255.255.254",
+            "::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in [
+            "",
+            "localhost.",
+            "localhost.example.com",
+            "redis.example.com",
+            "10.0.0.5",
+            "127.1",
+            "0.0.0.0",
+            "[::1]",
+            "::2",
+            "::ffff:10.0.0.5",
+            "::1%lo",
+            " localhost",
+            "/var/run/postgresql",
+        ] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+    }
 
     // ===== is_named_binary =====
 

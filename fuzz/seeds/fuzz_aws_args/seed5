@@ -1,0 +1,1 @@
+--query Reservations[].InstanceId

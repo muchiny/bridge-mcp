@@ -6,8 +6,8 @@ Only the latest major release gets security fixes.
 
 | Version | Supported |
 |---------|-----------|
-| 6.x     | Yes       |
-| < 6.0   | No        |
+| 7.x     | Yes       |
+| < 7.0   | No        |
 
 ## Reporting a Vulnerability
 
@@ -180,6 +180,217 @@ write out of reach of these tools.
 - **Standard** (default) and **Strict**: command tools need a whitelist match
   (the validator treats the two modes the same)
 - **Permissive**: command tools run anything the blacklist does not match
+
+### Destination Arguments and Stored Credentials
+
+A tool argument that chooses where a program connects must not cause a
+credential of the target host (a password in an option file, a password file
+or an environment variable; a token, certificate, key or configuration file;
+a cloud profile) to be presented to that destination, nor read or write such
+a file of the host. Three ways to keep this true:
+
+- **Drop the argument,** or limit it to values that cannot name a destination
+  or a credential file:
+
+  - The Vault tools take no server address: the host's own `VAULT_ADDR`
+    applies.
+
+  - `ssh_aws_cli` takes no endpoint, profile, CA bundle or signing argument:
+    it runs with the AWS identity and endpoint configured on the host
+    (environment, `~/.aws`, instance role). `args` is split into words and
+    each word is quoted on its own. An option must be one of a fixed list of
+    resource selectors and paging options, matched exactly, because the AWS
+    CLI reads any unambiguous prefix of a global option. The CLI may also
+    read an allowed name as a longer option of the same operation; none of
+    those chooses the endpoint, the profile, the signing or a file (checked
+    against awscli 1.46.3). A word that is neither an option nor the value
+    of one must be an `s3://` location with no `.` or `..` segment, and the
+    operations that write an output file (`s3api
+    get-object`, `lambda invoke`, `eks update-kubeconfig` and the like) are
+    refused: the tool reads and writes no file of the host. Parameter values
+    that the AWS CLI would load from a file or URL (`file://`, `fileb://`,
+    `http://`, `https://`) are refused, and `--region` must be a region
+    name. The services that read or write the identity of the host
+    (`configure`, `sso`, `sso-oidc`, `login`, `logout`, `history`) are
+    refused, and so are the operations that print or issue a credential or a
+    bearer token (for example `sts get-session-token`, `sts assume-role`,
+    `ecr get-login-password`, `s3 presign`, `eks get-token`,
+    `iam create-access-key`, `apigateway get-api-keys` and the `lightsail`
+    key pair, access-details and master-password operations).
+
+  - The compose tools (`ssh_docker_compose`, `ssh_podman_compose`) accept
+    only a local path for `file`. The compose client may read Git URLs,
+    `oci://` references, `host:path` forms, `github.com/...` shorthands
+    (version-dependent) and standard input in place of a file, and fetching
+    one makes the Git or registry client of the host present its own
+    credentials to a server the caller chose. `file` is therefore limited to
+    `[A-Za-z0-9/._-]`, not starting with `-`, and anchored: absolute,
+    starting with `./` or `../`, or a bare file name. The same client loads
+    Git and OCI resources named by an `include:` of a compose file already on
+    the host, so both tools put `COMPOSE_EXPERIMENTAL_GIT_REMOTE=false
+    COMPOSE_EXPERIMENTAL_OCI_REMOTE=false` in front of the compose program.
+
+  - `ssh_git_pull` accepts only the name of a remote configured in the
+    repository (ASCII letters, digits, `.`, `-`, `_`, not starting with `.`
+    or `-`), never a URL or a path. It requires a remote when a branch is
+    given, because git reads the first positional argument as the
+    repository.
+
+  - `ssh_k8s_port_forward` binds loopback addresses only (`address` is
+    `localhost` in lower case, `127.0.0.1`, `::1`, another loopback address,
+    or a comma list of those). A Helm `kubeconfig` is accepted only from the
+    system directories (`/etc/rancher/k3s/`, `/etc/rancher/rke2/`,
+    `/etc/kubernetes/`, `/var/snap/microk8s/current/credentials/`,
+    `/var/lib/k0s/pki/`) or as exactly `/root/.kube/config`,
+    `~/.kube/config` or `$HOME/.kube/config`. Any other file of a `.kube`
+    directory is refused, because a kubeconfig names the server and the
+    credential files (`tokenFile`, client certificate, `exec` plugin) the
+    client uses, and another tool can write such a file.
+
+- **Tie the credential to the destination.**
+
+  - The database tools (`ssh_db_query`, `ssh_db_dump`, `ssh_db_restore`) take
+    a `db_host`. The credentials stored on the host (`~/.my.cnf`,
+    `~/.mylogin.cnf`, `~/.pgpass`, `PGPASSWORD`, `PGSERVICE` and the like)
+    are used for the local server only: `localhost`, a loopback address
+    (`127.0.0.0/8`, `::1`, `::ffff:127.x.y.z`) or, for PostgreSQL, the two
+    default socket directories. A call to any other server needs a
+    `db_password` in the call, and the command the tool builds hides the
+    stored sources from the client: the `unset` of the password variables, an
+    option file or password file built from the call, and, for MySQL, a
+    changed `HOME` and a client that reads that option file only, for
+    PostgreSQL, a client certificate file that does not exist (`PGSSLCERT`).
+    PostgreSQL clients always run with `-w` (never prompt for a password).
+    `db_host` is one host name or address and nothing else (no list, no
+    connection parameters), like the PostgreSQL `database`, which is refused
+    when it is a connection string.
+
+  - The Redis tools (`ssh_redis_cli`, `ssh_redis_info`, `ssh_redis_keys`)
+    take a `redis_host`. The `REDISCLI_AUTH` (or `VALKEYCLI_AUTH`, for
+    `valkey-cli`) of the SSH user is used for the local server only (no
+    `redis_host`, `localhost` or a loopback address); for any other server
+    the command starts with `unset REDISCLI_AUTH VALKEYCLI_AUTH &&`, so
+    `redis-cli` sends no password unless the call gives a `redis_password`
+    (read from standard input with `--askpass`, never `-a`). A Redis server
+    without a password needs no argument. `redis_host` is one host name or
+    address and nothing else.
+
+  - `ssh_storage_mount` applies the same rule to network file systems. For
+    `cifs`, `smb3`, `nfs`, `nfs4`, `ceph`, and for a mount with no type (or
+    `auto`) of a `//server/share` or `host:path` device, the
+    options that choose a credential source of the host are refused:
+    `credentials`, `cred`, `cruid`, `multiuser`, `upcall_target`, `sec=` with
+    a `krb5*`, `lkey*` or `spkm3` flavor, `xprtsec=mtls` (the certificate of
+    `tlshd`), `secretfile`, `conf` and `key`. A `ceph` mount must give
+    exactly one `secret=` whose value is a CephX key of at most 40 base64
+    characters, because `mount.ceph` otherwise (or with a value it does not
+    keep) takes the key of the client name from a keyring of the host. A
+    quote character in `options` is refused, because the mount helpers do not
+    read a quoted key or value as written. `none` is refused for a device of
+    a network form, and so is a device with `@` when no type is fixed: both
+    make `mount` try the types listed in `/etc/filesystems` (a bind or move
+    mount, which runs no helper, is exempt). For `cifs`,
+    `smb3` and a `//server/share` device the command starts with
+    `unset PASSWD PASSWD_FD PASSWD_FILE PASSWD2 PASSWD2_FD PASSWD2_FILE USER &&`,
+    the variables `mount.cifs` reads before `-o` (`USER` is its user name
+    when the call gives none). Credentials given in the
+    call (`username=`, `password=`, `domain=`, `secret=`, `sec=ntlmssp`,
+    `xprtsec=tls`) are used.
+
+  - The `ssh_ldap_*` tools bind with `-x` (a simple anonymous bind: no bind
+    DN, no password, no SASL). The one credential of the host that can go out
+    is the TLS client certificate named by `TLS_CERT` and `TLS_KEY` of a user
+    `ldaprc`, or by `LDAPTLS_CERT` and `LDAPTLS_KEY`. It is presented only to
+    a server of the host: an `ldapi://` socket, or `ldap://` or `ldaps://`
+    with `localhost` or a loopback address. For any other `uri` the command
+    starts with `LDAPTLS_CERT= LDAPTLS_KEY=`, which overrides every `ldaprc`
+    and every ambient value. `uri` is one `scheme://host[:port]` and nothing
+    else (no list, no user information, no path; an `ldapi` socket path is
+    %-escaped).
+
+- **Hide the credential source from the program.**
+
+  - The webhook tools (`ssh_webhook_send`, `ssh_notify`) take a URL and need
+    no credential of the host: `curl` runs with `-q` as its first argument,
+    so `~/.curlrc` (and `$CURL_HOME/.curlrc`) is not read and none of its
+    `user`, `header`, `oauth2-bearer` or `netrc` lines reaches that URL. A
+    proxy comes from the `https_proxy` environment variable. The probe of
+    `ssh_k8s_port_forward` and the request of `ssh_traefik_introspect` run
+    `curl -q` for the same reason.
+
+  - `ssh_git_clone` and `ssh_git_pull` start git with `-c http.extraHeader=`,
+    so a header that the git configuration of the host applies to every
+    server is not sent to the server the caller picked, and with
+    `unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED &&`, so
+    the client certificate of those variables is not presented either.
+    Credentials that git keys by host stay in effect for the server they
+    name: credential helpers (`store`, `cache`, `libsecret`, a manager),
+    `~/.netrc` `machine` entries and `http.<url>.extraHeader`.
+
+The tools `ssh_mysql_query`, `ssh_postgresql_query`, `ssh_mysql_status` and
+`ssh_postgresql_status` take no host and no password: they connect to the
+local server with the stored credentials.
+
+Limits of this protection:
+
+- The stored credentials are used for whatever listens on the loopback address
+  and port the call names (`db_port` is the caller's choice; `redis_port` for
+  the Redis tools; the port of an `ldap://` or `ldaps://` `uri` for the LDAP
+  tools), so a process able to listen on the host's loopback interface
+  receives them.
+- Kerberos/GSSAPI tickets held by the SSH user are not hidden from another
+  server. The one option a tool refuses is `sec=krb5*` of `ssh_storage_mount`,
+  and that does not close the NFS routes: when `sec=` is absent the NFS
+  client negotiates a flavor with the server, which can be Kerberos, and when
+  the host has an `/etc/krb5.keytab` NFSv4 lease management uses its `host/`
+  or `nfs/` principal whatever `sec=` says.
+- The git tools hide only an unscoped `http.extraHeader` and the `GIT_SSL_*`
+  client certificate variables. An unscoped `http.sslCert` and `http.sslKey`
+  in the git configuration (git has no per-command reset for them), a
+  credential helper that answers for any host, a `~/.netrc` `default` entry,
+  `GIT_ASKPASS`, `SSH_ASKPASS`, `core.sshCommand`, `GIT_SSH_COMMAND` and the
+  `ssh` configuration (`ForwardAgent`, `StrictHostKeyChecking`,
+  `IdentityFile` under `Host *`) are configuration of the host, not hidden by
+  the tools: key them to the servers the host is meant to reach.
+  `ssh_git_clone` can still be pointed at any repository of a forge for which
+  the host holds a token or deploy key keyed to that forge, and a header keyed
+  to a server (`http.<url>.extraHeader`) still goes to it. When the git
+  configuration holds an unscoped `extraHeader` followed by a scoped one that
+  matches the destination, both are sent. `branch` of `ssh_git_pull` is still
+  a free refspec: it can name a local ref, not a server.
+- `ssh_aws_cli` runs with the AWS identity of the host and reads whatever
+  that identity can read, stored secrets included (`secretsmanager
+  get-secret-value`, `ssm get-parameter`): any API call that identity may make
+  through the permitted options is made. The refused services and operations
+  are those that print or issue a credential or a token; the list is not a
+  model of everything an identity can read.
+- For the Kubernetes tools, `~/.kube/config` is accepted as a Helm
+  `kubeconfig`, because the client reads it by default: a file written there
+  by another tool still points Helm at that file's server. The system
+  directories are taken to be root-owned. A `KUBECONFIG` or `~/.kube/config`
+  set in the environment of the SSH user applies to every `ssh_k8s_*` tool
+  and is the operator's configuration. The probe of `ssh_k8s_port_forward`
+  still honours `http_proxy`, and a loopback port is reachable by the other
+  local users. `ssh_k8s_kubeconfig_generate` prints a `server_url` named by
+  the caller with a new token in its output; it connects to nothing.
+- The `ssh_ldap_*` tools without `uri` use the server, and so the client
+  certificate, of the host's own `ldap.conf`. `TLS_CACERT` and `TLS_REQCERT`
+  still apply to every server, so a relaxed `TLS_REQCERT` on the host is not
+  overridden.
+- The compose tools do not judge the content of a compose file, in the same
+  way as the playbook tools above. The Git and OCI loaders are off, but the
+  registry credentials used to pull an image (`~/.docker/config.json`) are
+  not hidden, and the switches act only on compose versions that read them
+  (confirmed on v5.7.0; `docker-compose` v1 and `podman-compose` have no such
+  loader).
+- `ssh_storage_mount` filters the options of the file system types listed
+  above; the options of other network file system types are not examined.
+- `redis-cli` connects without TLS: a `redis_password` crosses the network in
+  clear to a remote server. Like `db_password`, it is part of the command line
+  the remote shell runs and of the command text in the bridge's audit log.
+- `ssh_db_restore` runs its input file as a client script: `psql` backslash
+  commands act on the host and can open another connection, and the file's
+  statements go to the server named by `db_host`.
 
 ### What This Project Does NOT Protect Against
 

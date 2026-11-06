@@ -1,6 +1,14 @@
 //! SSH Git Clone Tool Handler
 //!
 //! Clones a Git repository on a remote host via `git clone`.
+//!
+//! The URL is the caller's choice. Credentials keyed by host (a credential
+//! helper, a `~/.netrc` `machine` entry, `http.<url>.extraHeader`) are used
+//! for the server they name; an unscoped `http.extraHeader` and the
+//! `GIT_SSL_CERT` / `GIT_SSL_KEY` client certificate variables of the host
+//! are not sent. An unscoped `http.sslCert` / `http.sslKey`, a credential
+//! helper that answers for any host and a `~/.netrc` `default` entry are
+//! presented to the URL (see `domain::use_cases::git`).
 
 use serde::Deserialize;
 
@@ -42,7 +50,13 @@ impl StandardTool for GitCloneTool {
     const NAME: &'static str = "ssh_git_clone";
 
     const DESCRIPTION: &'static str = "Clone a Git repository on a remote host. Supports shallow clones (--depth), branch \
-        selection (--branch), and single-branch mode. The URL can be HTTPS or SSH.";
+        selection (--branch), and single-branch mode. The URL can be HTTPS or SSH. An unscoped \
+        http.extraHeader and the GIT_SSL_CERT / GIT_SSL_KEY client certificate variables of \
+        the host are not sent; credentials keyed by host (credential helper, ~/.netrc machine \
+        entry, http.<url>.extraHeader) still apply. An unscoped http.sslCert / http.sslKey in \
+        the host's git config, a credential helper that answers for any host and a ~/.netrc \
+        default entry are presented to the URL: operators avoid them on hosts exposed to \
+        these tools.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -260,6 +274,29 @@ mod tests {
     }
 
     #[test]
+    fn test_description_states_the_residual_credential_sources() {
+        for needle in ["GIT_SSL_CERT", "http.sslCert", "any host", "~/.netrc"] {
+            assert!(GitCloneTool::DESCRIPTION.contains(needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn test_build_command_golden() {
+        let args: SshGitCloneArgs = serde_json::from_value(json!({
+            "host": "s", "url": "https://git.example.org/o/r.git", "destination": "/opt/r",
+            "branch": "main", "depth": 1, "single_branch": true
+        }))
+        .unwrap();
+        let cmd = GitCloneTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -c http.extraHeader= clone --branch 'main' --depth 1 --single-branch \
+             -- 'https://git.example.org/o/r.git' '/opt/r'"
+        );
+    }
+
+    #[test]
     fn test_build_command_defaults() {
         let args = SshGitCloneArgs {
             host: "s".to_string(),
@@ -273,8 +310,11 @@ mod tests {
             save_output: None,
         };
         let cmd = GitCloneTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("git clone"));
-        assert!(cmd.contains("https://github.com/user/repo.git"));
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -c http.extraHeader= clone -- 'https://github.com/user/repo.git'"
+        );
     }
 
     #[test]
@@ -291,9 +331,12 @@ mod tests {
             save_output: None,
         };
         let cmd = GitCloneTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("git clone"));
-        assert!(cmd.contains("develop"));
-        assert!(cmd.contains("--depth"));
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -c http.extraHeader= clone --branch 'develop' --depth 1 --single-branch \
+             -- 'git@github.com:user/repo.git' '/opt/repo'"
+        );
     }
 
     #[test]

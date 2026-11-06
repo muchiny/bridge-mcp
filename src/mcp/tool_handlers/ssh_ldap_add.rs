@@ -39,9 +39,12 @@ impl StandardTool for LdapAddTool {
         using LDIF format via ldapadd. Use for new entries only — fails if the DN already \
         exists; to update an existing entry use ssh_ldap_modify instead. Do not include \
         'changetype: add' in the LDIF — ldapadd treats all entries as additions implicitly \
-        (including changetype causes errors). Authentication uses the remote host's system \
-        ldap.conf / SASL configuration (e.g. EXTERNAL, GSSAPI); no credentials are passed \
-        on the command line.";
+        (including changetype causes errors). Simple bind (-x), anonymous: no bind DN, password \
+        or SASL \
+        mechanism (EXTERNAL, GSSAPI) is used and no credential is passed on the command line. \
+        The TLS trust settings of the host's ldap.conf apply (TLS_CACERT, TLS_REQCERT); its TLS \
+        client certificate (TLS_CERT/TLS_KEY) is presented only to a server of the host itself \
+        (ldapi://, localhost or a loopback address), never to another 'uri'.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -56,7 +59,7 @@ impl StandardTool for LdapAddTool {
             },
             "uri": {
                 "type": "string",
-                "description": "LDAP URI (e.g. 'ldap://ldap.example.com'). Uses system default if omitted."
+                "description": "One ldap://, ldaps:// or ldapi:// URI of the form scheme://host[:port] (e.g. 'ldaps://ldap.example.com'); no list, path or query. Uses the server of the host's ldap.conf if omitted. The host's TLS client certificate is presented only to a local server (ldapi://, localhost, loopback address), not to another host."
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -85,7 +88,10 @@ impl StandardTool for LdapAddTool {
     }
 
     fn validate(args: &SshLdapAddArgs, _host_config: &HostConfig) -> Result<()> {
-        LdapCommandBuilder::validate_ldif(&args.ldif)
+        LdapCommandBuilder::validate_ldif(&args.ldif)?;
+        args.uri
+            .as_deref()
+            .map_or(Ok(()), LdapCommandBuilder::validate_uri)
     }
 }
 
@@ -199,5 +205,65 @@ mod tests {
             }
             e => panic!("Expected CommandDenied, got: {e:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_a_uri_that_is_not_one_ldap_uri() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshLdapAddHandler::new();
+        let ctx = create_test_context_with_host();
+        for uri in [
+            "",
+            "ldap://a ldap://b",
+            "ldap://a,ldap://b",
+            "ldap://user@h",
+            "ldap://h/dc=x",
+            "http://h",
+            "ldap://$(id)",
+            "-H",
+        ] {
+            let result = handler
+                .execute(
+                    Some(json!({"host": "server1", "ldif": "dn: cn=x", "uri": uri})),
+                    &ctx,
+                )
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("'uri'"), "{uri:?}: {reason}");
+                }
+                e => panic!("Expected CommandDenied for {uri:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_certificate_of_the_host_goes_to_a_local_server_only() {
+        let host = test_host_config();
+        let args: SshLdapAddArgs = serde_json::from_value(
+            json!({"host": "server1", "ldif": "dn: cn=x", "uri": "ldaps://ldap.example.com"}),
+        )
+        .unwrap();
+        assert_eq!(
+            LdapAddTool::build_command(&args, &host).unwrap(),
+            "printf '%s' 'dn: cn=x' | LDAPTLS_CERT= LDAPTLS_KEY= ldapadd -x \
+             -H 'ldaps://ldap.example.com'"
+        );
+        let args: SshLdapAddArgs = serde_json::from_value(
+            json!({"host": "server1", "ldif": "dn: cn=x", "uri": "ldap://localhost"}),
+        )
+        .unwrap();
+        assert_eq!(
+            LdapAddTool::build_command(&args, &host).unwrap(),
+            "printf '%s' 'dn: cn=x' | ldapadd -x -H 'ldap://localhost'"
+        );
+        assert!(LdapAddTool::validate(&args, &host).is_ok());
+    }
+
+    #[test]
+    fn test_description_does_not_claim_sasl_or_ldap_conf_credentials() {
+        assert!(!LdapAddTool::DESCRIPTION.contains("ldap.conf / SASL configuration"));
+        assert!(LdapAddTool::DESCRIPTION.contains("Simple bind (-x), anonymous"));
+        assert!(LdapAddTool::SCHEMA.contains("ldapi://"));
     }
 }

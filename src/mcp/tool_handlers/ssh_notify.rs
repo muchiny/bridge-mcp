@@ -253,7 +253,7 @@ mod tests {
             save_output: None,
         };
         let cmd = NotifyTool::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("curl -s -X POST"));
+        assert!(cmd.contains("curl -q -s -X POST"));
         assert!(cmd.contains("hostname"));
         assert!(cmd.contains("timestamp"));
     }

@@ -45,9 +45,12 @@ impl StandardTool for LdapGroupMembersTool {
         and 'memberUid' attributes. Use this instead of ssh_ldap_search when you want group \
         membership for a known group by cn; use ssh_ldap_search for arbitrary filters. To look up \
         a specific user use ssh_ldap_user_info. On Windows Active Directory hosts use \
-        ssh_ad_group_members instead (PowerShell-based, richer AD attributes). Authentication uses \
-        the remote host's system ldap.conf / SASL configuration (e.g. EXTERNAL, GSSAPI); no \
-        credentials are passed on the command line.";
+        ssh_ad_group_members instead (PowerShell-based, richer AD attributes). Simple bind \
+        (-x), anonymous: no bind DN, password or SASL \
+        mechanism (EXTERNAL, GSSAPI) is used and no credential is passed on the command line. \
+        The TLS trust settings of the host's ldap.conf apply (TLS_CACERT, TLS_REQCERT); its TLS \
+        client certificate (TLS_CERT/TLS_KEY) is presented only to a server of the host itself \
+        (ldapi://, localhost or a loopback address), never to another 'uri'.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -66,7 +69,7 @@ impl StandardTool for LdapGroupMembersTool {
             },
             "uri": {
                 "type": "string",
-                "description": "LDAP URI (e.g. 'ldap://ldap.example.com'). Uses system default if omitted."
+                "description": "One ldap://, ldaps:// or ldapi:// URI of the form scheme://host[:port] (e.g. 'ldaps://ldap.example.com'); no list, path or query. Uses the server of the host's ldap.conf if omitted. The host's TLS client certificate is presented only to a local server (ldapi://, localhost, loopback address), not to another host."
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -93,6 +96,12 @@ impl StandardTool for LdapGroupMembersTool {
             &args.group,
             args.uri.as_deref(),
         ))
+    }
+
+    fn validate(args: &SshLdapGroupMembersArgs, _host_config: &HostConfig) -> Result<()> {
+        args.uri
+            .as_deref()
+            .map_or(Ok(()), LdapCommandBuilder::validate_uri)
     }
 }
 
@@ -307,5 +316,77 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_refuses_a_uri_that_is_not_one_ldap_uri() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshLdapGroupMembersHandler::new();
+        let ctx = create_test_context_with_host();
+        for uri in [
+            "",
+            "ldap://a ldap://b",
+            "ldap://a,ldap://b",
+            "ldap://user@h",
+            "ldap://h/dc=x",
+            "http://h",
+            "ldap://$(id)",
+            "-H",
+        ] {
+            let result = handler
+                .execute(
+                    Some(json!({
+                        "host": "server1",
+                        "base_dn": "dc=x",
+                        "group": "devs",
+                        "uri": uri
+                    })),
+                    &ctx,
+                )
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("'uri'"), "{uri:?}: {reason}");
+                }
+                e => panic!("Expected CommandDenied for {uri:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_certificate_of_the_host_goes_to_a_local_server_only() {
+        let host = test_host_config();
+        let args: SshLdapGroupMembersArgs = serde_json::from_value(json!({
+            "host": "server1",
+            "base_dn": "dc=x",
+            "group": "devs",
+            "uri": "ldaps://ldap.example.com"
+        }))
+        .unwrap();
+        assert_eq!(
+            LdapGroupMembersTool::build_command(&args, &host).unwrap(),
+            "LDAPTLS_CERT= LDAPTLS_KEY= ldapsearch -x -LLL -H 'ldaps://ldap.example.com' \
+             -b 'dc=x' -s 'sub' -- '(cn=devs)' 'member' 'memberUid'"
+        );
+        let args: SshLdapGroupMembersArgs = serde_json::from_value(json!({
+            "host": "server1",
+            "base_dn": "dc=x",
+            "group": "devs",
+            "uri": "ldap://localhost:389"
+        }))
+        .unwrap();
+        assert_eq!(
+            LdapGroupMembersTool::build_command(&args, &host).unwrap(),
+            "ldapsearch -x -LLL -H 'ldap://localhost:389' -b 'dc=x' -s 'sub' -- '(cn=devs)' \
+             'member' 'memberUid'"
+        );
+        assert!(LdapGroupMembersTool::validate(&args, &host).is_ok());
+    }
+
+    #[test]
+    fn test_description_does_not_claim_sasl_or_ldap_conf_credentials() {
+        assert!(!LdapGroupMembersTool::DESCRIPTION.contains("ldap.conf / SASL configuration"));
+        assert!(LdapGroupMembersTool::DESCRIPTION.contains("Simple bind (-x), anonymous"));
+        assert!(LdapGroupMembersTool::SCHEMA.contains("ldapi://"));
     }
 }

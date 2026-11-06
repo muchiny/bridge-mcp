@@ -270,6 +270,28 @@ mod tests {
     }
 
     #[test]
+    fn test_build_command_curl_ignores_the_curlrc() {
+        let args = SshTraefikIntrospectArgs {
+            host: "k8s".into(),
+            api_path: "/rawdata".into(),
+            namespace: None,
+            api_port: 8080,
+            wait_secs: 5,
+            context: None,
+            kubectl_bin: Some("kubectl".into()),
+            timeout_seconds: None,
+            max_output: None,
+            save_output: None,
+        };
+        let cmd = TraefikIntrospect::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.contains(" curl -q -sS -m 8 'http://127.0.0.1:8080/api/rawdata' "),
+            "cmd: {cmd}"
+        );
+        assert!(!cmd.contains("curl -sS"), "cmd: {cmd}");
+    }
+
+    #[test]
     fn test_build_command_rejects_invalid_path() {
         let args = SshTraefikIntrospectArgs {
             host: "k8s".into(),

@@ -183,7 +183,9 @@ security:
     - "^systemctl\\s+(status|list-units|is-active).*"
 
     # Git commands
-    - "^git\\s+(status|log|branch|remote|diff|pull|clone|checkout).*"
+    # ssh_git_clone and ssh_git_pull start with
+    # "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && git ..."
+    - "^(unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && )?git\\s+(status|log|branch|remote|diff|pull|clone|checkout).*"
 
     # File viewing (specific paths)
     - "^cat\\s+/var/log/.*"

@@ -412,4 +412,17 @@ mod tests {
             }
         }
     }
+
+    /// These tools always connect to the local server and rely on the host's
+    /// stored credentials, so they must not offer a destination or a password:
+    /// a caller-chosen `db_host` would receive those credentials.
+    #[test]
+    fn test_schema_has_no_db_host_or_db_password() {
+        let handler = SshPostgresqlQueryHandler::new();
+        let schema = handler.schema();
+        let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
+        let properties = schema_json["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("db_host"));
+        assert!(!properties.contains_key("db_password"));
+    }
 }

@@ -1,11 +1,35 @@
 //! LDAP Command Builder
 //!
 //! Builds ldapsearch, ldapadd, and ldapmodify commands for `OpenLDAP` operations.
+//!
+//! Every command is a simple bind (`-x`): the tools send no bind DN and no
+//! password, so the bind is anonymous and no `SASL` mechanism (`EXTERNAL`,
+//! `GSSAPI`) is used. The one credential a client of the host can still
+//! present is the TLS client certificate that `TLS_CERT` / `TLS_KEY` of the
+//! user's `ldaprc` (or `LDAPTLS_CERT` / `LDAPTLS_KEY`) name: it goes out in
+//! the handshake with an `ldaps://` server. For any server but the host's own
+//! the call therefore runs with `LDAPTLS_CERT` and `LDAPTLS_KEY` set empty.
 
 use std::fmt::Write;
+use std::net::Ipv6Addr;
 
 use crate::config::ShellType;
 use crate::error::{BridgeError, Result};
+
+use super::shell::is_loopback_host;
+
+/// Longest `uri` accepted.
+const LDAP_URI_MAX_LEN: usize = 255;
+
+/// Environment of an LDAP client that connects to another server than the
+/// host's own: an empty `LDAPTLS_CERT` and `LDAPTLS_KEY` take precedence over
+/// `TLS_CERT` and `TLS_KEY` of every `ldaprc` (environment variables are the
+/// last source `libldap` reads), so the client certificate stored on the host
+/// is not presented in the TLS handshake. `TLS_CACERT` and `TLS_REQCERT` stay
+/// as configured: they decide whom the client trusts, not who it is. The tools
+/// use a simple bind without a bind DN, so `BINDDN` and `SASL_*` options do not
+/// apply (the client ignores `BINDDN` from `ldaprc`).
+const LDAP_REMOTE_ENV: &str = "LDAPTLS_CERT= LDAPTLS_KEY= ";
 
 fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
@@ -42,11 +66,123 @@ fn is_attribute_name(token: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ';' | '-' | '_'))
 }
 
+/// What the `scheme://authority` part of a `uri` designates.
+#[derive(Debug, PartialEq, Eq)]
+enum LdapTarget<'a> {
+    /// `ldapi://`: a `UNIX` socket of the host itself.
+    Socket,
+    /// `ldap://` or `ldaps://`: a host name or an IP address (without the
+    /// brackets of an `IPv6` address).
+    Network(&'a str),
+}
+
+/// Split a `uri` into what it designates, or `None` when it is not exactly
+/// one `ldap://`, `ldaps://` or `ldapi://` URI of the form `scheme://authority`
+/// (one optional trailing `/`).
+///
+/// - `ldap`, `ldaps`: a host (ASCII letters, digits, `.`, `-`, `_`, or an
+///   `IPv6` address in brackets) and an optional `:port` (1 to 65535). The
+///   host is not empty and has no user information, `%` escape, path, query
+///   or extension.
+/// - `ldapi`: the socket path, `%`-escaped (`%2Frun%2Fldapi`) or empty (the
+///   default socket); ASCII letters, digits, `.`, `-`, `_` and `%XX` only.
+///
+/// The scheme is read case-insensitively, like the client does.
+fn parse_ldap_uri(uri: &str) -> Option<LdapTarget<'_>> {
+    if uri.len() > LDAP_URI_MAX_LEN {
+        return None;
+    }
+    let (scheme, rest) = uri.split_once("://")?;
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    if scheme.eq_ignore_ascii_case("ldapi") {
+        let bytes = authority.as_bytes();
+        let mut i = 0;
+        while let Some(&b) = bytes.get(i) {
+            if b == b'%' {
+                let hex = bytes.get(i + 1..i + 3)?;
+                if !hex.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                i += 3;
+            } else if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_') {
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+        return Some(LdapTarget::Socket);
+    }
+    if !scheme.eq_ignore_ascii_case("ldap") && !scheme.eq_ignore_ascii_case("ldaps") {
+        return None;
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (address, after) = bracketed.split_once(']')?;
+        address.parse::<Ipv6Addr>().ok()?;
+        let port = if after.is_empty() {
+            None
+        } else {
+            Some(after.strip_prefix(':')?)
+        };
+        (address, port)
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        let name_like = !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+        if !name_like {
+            return None;
+        }
+        (host, port)
+    };
+    if let Some(port) = port {
+        let digits = !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
+        if !digits || !port.parse::<u16>().is_ok_and(|p| p != 0) {
+            return None;
+        }
+    }
+    Some(LdapTarget::Network(host))
+}
+
+/// Whether `uri` designates the directory server of the SSH host itself, the
+/// only one the host's stored TLS client certificate may be presented to:
+/// an `ldapi://` socket, or an `ldap://` / `ldaps://` URI whose host is
+/// `localhost` (any case) or a loopback IP address. A URI that is not a valid
+/// one, and any other host (a `DNS` name can point anywhere), is another
+/// server.
+fn is_local_ldap_uri(uri: &str) -> bool {
+    match parse_ldap_uri(uri) {
+        Some(LdapTarget::Socket) => true,
+        Some(LdapTarget::Network(host)) => is_loopback_host(host),
+        None => false,
+    }
+}
+
+/// The environment assignment that goes before the client program:
+/// [`LDAP_REMOTE_ENV`] for a `uri` that is not a local server, nothing for a
+/// local one and when there is no `uri` (the server of the host's `ldap.conf`,
+/// chosen by the host, not by the caller).
+fn client_env(uri: Option<&str>) -> &'static str {
+    if uri.is_some_and(|u| !is_local_ldap_uri(u)) {
+        LDAP_REMOTE_ENV
+    } else {
+        ""
+    }
+}
+
 /// Builds LDAP CLI commands for remote execution.
 pub struct LdapCommandBuilder;
 
 impl LdapCommandBuilder {
     /// Build an ldapsearch command.
+    ///
+    /// `uri` is checked by [`Self::validate_uri`]. For a server other than the
+    /// host's own, `LDAPTLS_CERT= LDAPTLS_KEY= ` goes before `ldapsearch`; without `uri`,
+    /// and for a local server, the command is unchanged. The same holds for
+    /// the other builders.
     #[must_use]
     pub fn build_search_command(
         base_dn: &str,
@@ -55,7 +191,7 @@ impl LdapCommandBuilder {
         scope: Option<&str>,
         uri: Option<&str>,
     ) -> String {
-        let mut cmd = String::from("ldapsearch -x -LLL");
+        let mut cmd = format!("{}ldapsearch -x -LLL", client_env(uri));
         if let Some(u) = uri {
             let _ = write!(cmd, " -H {}", shell_escape(u));
         }
@@ -104,7 +240,7 @@ impl LdapCommandBuilder {
     /// Build an ldapadd command (from LDIF on stdin).
     #[must_use]
     pub fn build_add_command(ldif_content: &str, uri: Option<&str>) -> String {
-        let mut cmd = String::from("ldapadd -x");
+        let mut cmd = format!("{}ldapadd -x", client_env(uri));
         if let Some(u) = uri {
             let _ = write!(cmd, " -H {}", shell_escape(u));
         }
@@ -115,12 +251,42 @@ impl LdapCommandBuilder {
     /// Build an ldapmodify command (from LDIF on stdin).
     #[must_use]
     pub fn build_modify_command(ldif_content: &str, uri: Option<&str>) -> String {
-        let mut cmd = String::from("ldapmodify -x");
+        let mut cmd = format!("{}ldapmodify -x", client_env(uri));
         if let Some(u) = uri {
             let _ = write!(cmd, " -H {}", shell_escape(u));
         }
         let escaped = shell_escape(ldif_content);
         format!("printf '%s' {escaped} | {cmd}")
+    }
+
+    /// Check the `uri` of an LDAP tool: one `ldap://`, `ldaps://` or `ldapi://`
+    /// URI of the form `scheme://host[:port]` (an `IPv6` address in brackets;
+    /// `ldapi://` with the `%`-escaped socket path, or empty for the default
+    /// one), at most 255 bytes. No list of URIs, spaces, commas, user
+    /// information, path, query or extensions.
+    ///
+    /// A server other than the host's own (anything but `ldapi://` and
+    /// `localhost` or a loopback address) is queried without the client
+    /// certificate that the host's `ldaprc` names.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BridgeError::CommandDenied` naming `uri`.
+    pub fn validate_uri(uri: &str) -> Result<()> {
+        if parse_ldap_uri(uri).is_some() {
+            Ok(())
+        } else {
+            Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "'uri' must be one ldap://, ldaps:// or ldapi:// URI of the form \
+                     scheme://host[:port] (IPv6 address in brackets; for ldapi:// %-escape the \
+                     socket path: ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi, not ldapi:///var/run/...), \
+                     at most {LDAP_URI_MAX_LEN} bytes, without spaces, commas, user \
+                     information, path or query: omit 'uri' to use the server of the host's \
+                     ldap.conf"
+                ),
+            })
+        }
     }
 
     /// Validate the `attributes` of an ldapsearch: whitespace-separated
@@ -444,5 +610,306 @@ mod tests {
                     description: include: foo\ndescription: control: 1:<x\n\
                     # include: file:///x\n# control: 1 true:< file:///x\ncn: includes\n";
         assert!(LdapCommandBuilder::validate_ldif(ldif).is_ok());
+    }
+
+    // ===== uri: client certificate of the host =====
+
+    const NO_CERT: &str = "LDAPTLS_CERT= LDAPTLS_KEY= ";
+
+    const REMOTE_URIS: [&str; 12] = [
+        "ldap://ldap.example.com",
+        "ldaps://ldap.example.com:636",
+        "LDAPS://Ldap.Example.com/",
+        "ldap://10.0.0.5:389",
+        "ldaps://[2001:db8::1]:636",
+        "ldap://localhost.example.com",
+        "ldap://localhost.",
+        "ldap://127.1",
+        "ldap://0.0.0.0",
+        "ldaps://[::2]",
+        "ldap://::1",
+        "not a uri",
+    ];
+
+    const LOCAL_URIS: [&str; 11] = [
+        "ldapi://",
+        "ldapi:///",
+        "ldapi://%2Frun%2Fslapd%2Fldapi",
+        "LDAPI://%2fvar%2frun%2fldapi",
+        "ldap://localhost",
+        "ldaps://LOCALHOST:636",
+        "ldap://127.0.0.1:389/",
+        "ldaps://127.0.0.2",
+        "ldap://[::1]",
+        "ldaps://[::1]:636",
+        "ldap://[::ffff:127.0.0.1]:389",
+    ];
+
+    #[test]
+    fn test_search_golden_strings() {
+        assert_eq!(
+            LdapCommandBuilder::build_search_command("dc=x", None, None, None, None),
+            "ldapsearch -x -LLL -b 'dc=x'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_search_command(
+                "dc=example,dc=com",
+                Some("(cn=a)"),
+                Some("cn mail"),
+                Some("sub"),
+                Some("ldaps://ldap.example.com"),
+            ),
+            "LDAPTLS_CERT= LDAPTLS_KEY= ldapsearch -x -LLL -H 'ldaps://ldap.example.com' \
+             -b 'dc=example,dc=com' -s 'sub' -- '(cn=a)' 'cn' 'mail'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_search_command(
+                "dc=x",
+                None,
+                None,
+                None,
+                Some("ldapi://%2Frun%2Fslapd%2Fldapi"),
+            ),
+            "ldapsearch -x -LLL -H 'ldapi://%2Frun%2Fslapd%2Fldapi' -b 'dc=x'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_search_command(
+                "dc=x",
+                None,
+                None,
+                None,
+                Some("ldap://localhost:389")
+            ),
+            "ldapsearch -x -LLL -H 'ldap://localhost:389' -b 'dc=x'"
+        );
+    }
+
+    #[test]
+    fn test_user_info_and_group_members_golden_strings() {
+        assert_eq!(
+            LdapCommandBuilder::build_user_info_command("dc=x", "jdoe", Some("ldap://10.0.0.5")),
+            "LDAPTLS_CERT= LDAPTLS_KEY= ldapsearch -x -LLL -H 'ldap://10.0.0.5' -b 'dc=x' \
+             -s 'sub' -- '(uid=jdoe)'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_user_info_command("dc=x", "jdoe", Some("ldap://127.0.0.1")),
+            "ldapsearch -x -LLL -H 'ldap://127.0.0.1' -b 'dc=x' -s 'sub' -- '(uid=jdoe)'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_group_members_command(
+                "dc=x",
+                "ops",
+                Some("ldaps://ldap.example.com")
+            ),
+            "LDAPTLS_CERT= LDAPTLS_KEY= ldapsearch -x -LLL -H 'ldaps://ldap.example.com' \
+             -b 'dc=x' -s 'sub' -- '(cn=ops)' 'member' 'memberUid'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_group_members_command("dc=x", "ops", None),
+            "ldapsearch -x -LLL -b 'dc=x' -s 'sub' -- '(cn=ops)' 'member' 'memberUid'"
+        );
+    }
+
+    #[test]
+    fn test_add_and_modify_golden_strings() {
+        assert_eq!(
+            LdapCommandBuilder::build_add_command("dn: cn=x", None),
+            "printf '%s' 'dn: cn=x' | ldapadd -x"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_add_command("dn: cn=x", Some("ldaps://ldap.example.com:636")),
+            "printf '%s' 'dn: cn=x' | LDAPTLS_CERT= LDAPTLS_KEY= ldapadd -x \
+             -H 'ldaps://ldap.example.com:636'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_add_command("dn: cn=x", Some("ldapi://")),
+            "printf '%s' 'dn: cn=x' | ldapadd -x -H 'ldapi://'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_modify_command("dn: cn=x", None),
+            "printf '%s' 'dn: cn=x' | ldapmodify -x"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_modify_command("dn: cn=x", Some("ldap://ldap.example.com")),
+            "printf '%s' 'dn: cn=x' | LDAPTLS_CERT= LDAPTLS_KEY= ldapmodify -x \
+             -H 'ldap://ldap.example.com'"
+        );
+        assert_eq!(
+            LdapCommandBuilder::build_modify_command("dn: cn=x", Some("ldaps://[::1]:636")),
+            "printf '%s' 'dn: cn=x' | ldapmodify -x -H 'ldaps://[::1]:636'"
+        );
+    }
+
+    #[test]
+    fn test_every_builder_drops_the_host_client_certificate_for_another_server() {
+        for uri in REMOTE_URIS {
+            let u = Some(uri);
+            let commands = [
+                LdapCommandBuilder::build_search_command("dc=x", None, None, None, u),
+                LdapCommandBuilder::build_user_info_command("dc=x", "a", u),
+                LdapCommandBuilder::build_group_members_command("dc=x", "a", u),
+                LdapCommandBuilder::build_add_command("dn: cn=x", u),
+                LdapCommandBuilder::build_modify_command("dn: cn=x", u),
+            ];
+            for cmd in commands {
+                assert!(cmd.contains(&format!("{NO_CERT}ldap")), "{uri}: {cmd}");
+                assert!(!cmd.contains("-D") && !cmd.contains("-w"), "{uri}: {cmd}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_no_builder_adds_the_override_for_the_local_server() {
+        for uri in LOCAL_URIS {
+            let u = Some(uri);
+            let commands = [
+                LdapCommandBuilder::build_search_command("dc=x", None, None, None, u),
+                LdapCommandBuilder::build_user_info_command("dc=x", "a", u),
+                LdapCommandBuilder::build_group_members_command("dc=x", "a", u),
+                LdapCommandBuilder::build_add_command("dn: cn=x", u),
+                LdapCommandBuilder::build_modify_command("dn: cn=x", u),
+            ];
+            for cmd in commands {
+                assert!(!cmd.contains("LDAPTLS"), "{uri}: {cmd}");
+            }
+        }
+        let none = [
+            LdapCommandBuilder::build_search_command("dc=x", None, None, None, None),
+            LdapCommandBuilder::build_add_command("dn: cn=x", None),
+            LdapCommandBuilder::build_modify_command("dn: cn=x", None),
+        ];
+        for cmd in none {
+            assert!(!cmd.contains("LDAPTLS"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_no_builder_sets_trust_or_sasl_options() {
+        let cmd = LdapCommandBuilder::build_search_command(
+            "dc=x",
+            None,
+            None,
+            None,
+            Some("ldaps://ldap.example.com"),
+        );
+        for forbidden in [
+            "CACERT",
+            "REQCERT",
+            "LDAPNOINIT",
+            "SASL",
+            " -Y",
+            " -ZZ",
+            " -D",
+            " -w",
+            " -W",
+        ] {
+            assert!(!cmd.contains(forbidden), "{forbidden}: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_is_local_ldap_uri() {
+        for uri in LOCAL_URIS {
+            assert!(is_local_ldap_uri(uri), "{uri}");
+        }
+        for uri in REMOTE_URIS {
+            assert!(!is_local_ldap_uri(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn test_validate_uri_accepts_one_uri() {
+        for uri in LOCAL_URIS.iter().chain(&REMOTE_URIS[..10]) {
+            assert!(LdapCommandBuilder::validate_uri(uri).is_ok(), "{uri}");
+        }
+        for uri in [
+            "ldap://a_b.example.com:1",
+            "ldaps://h:65535",
+            "ldap://[::1]:389/",
+        ] {
+            assert!(LdapCommandBuilder::validate_uri(uri).is_ok(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn test_validate_uri_refuses_everything_else() {
+        let too_long = format!("ldap://{}", "a".repeat(LDAP_URI_MAX_LEN));
+        for bad in [
+            "",
+            "ldap.example.com",
+            "ldap://",
+            "ldap:///",
+            "ldaps://",
+            "http://ldap.example.com",
+            "ldap:/ldap.example.com",
+            "ldap://a ldap://b",
+            "ldap://a,ldap://b",
+            "ldap://a\tldap://b",
+            "ldap://a\nldap://b",
+            " ldap://a",
+            "ldap://a ",
+            "ldap://user@ldap.example.com",
+            "ldap://user:pw@ldap.example.com",
+            "ldap://ldap.example.com//",
+            "ldap://ldap.example.com/dc=x",
+            "ldap://ldap.example.com/??sub",
+            "ldap://ldap.example.com?",
+            "ldap://ldap.example.com#x",
+            "ldap://ldap.example.com\\x",
+            "ldap://loc%61lhost",
+            "ldap://host:",
+            "ldap://host:0",
+            "ldap://host:65536",
+            "ldap://host:99999999999",
+            "ldap://host:+389",
+            "ldap://host:389:389",
+            "ldap://host:ldap",
+            "ldap://::1",
+            "ldap://[::1",
+            "ldap://[::1]x",
+            "ldap://[::1]:",
+            "ldap://[localhost]",
+            "ldap://[fe80::1%eth0]",
+            "ldap://\u{e9}.example.com",
+            "ldap://$(id)",
+            "ldap://a;id",
+            "ldap://a`id`",
+            "ldap://a'b",
+            "ldapi://%2",
+            "ldapi://%zz",
+            "ldapi://a b",
+            "ldapi://%2Frun/dc=x",
+            "ldapi://a:b",
+            "-H",
+            "--",
+            too_long.as_str(),
+        ] {
+            match LdapCommandBuilder::validate_uri(bad) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(reason.contains("'uri'"), "{bad:?}");
+                    assert!(reason.contains("omit 'uri'"), "{bad:?}");
+                }
+                other => panic!("expected CommandDenied for {bad:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_uri_refusal_tells_to_escape_the_ldapi_socket_path() {
+        for bad in ["ldapi:///srv/x/ldapi", "ldapi://srv/x"] {
+            match LdapCommandBuilder::validate_uri(bad) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(
+                        reason.contains("%-escape the socket path"),
+                        "{bad:?}: {reason}"
+                    );
+                    assert!(
+                        reason.contains("ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi"),
+                        "{bad:?}: {reason}"
+                    );
+                }
+                other => panic!("expected CommandDenied for {bad:?}, got {other:?}"),
+            }
+        }
     }
 }

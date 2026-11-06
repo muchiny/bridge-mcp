@@ -15,6 +15,7 @@ use crate::mcp_standard_tool;
 pub struct SshRedisInfoArgs {
     host: String,
     redis_host: Option<String>,
+    redis_password: Option<String>,
     redis_port: Option<u16>,
     section: Option<String>,
     timeout_seconds: Option<u64>,
@@ -35,8 +36,11 @@ impl StandardTool for RedisInfoTool {
     const DESCRIPTION: &'static str = "Get Redis server information (INFO) on a remote host. \
         Use this for structured server diagnostics: memory usage, connected clients, replication \
         topology, persistence state, CPU, keyspace, and cluster status. Filter by section to \
-        reduce output. Auth is sourced from the REDISCLI_AUTH environment variable or \
-        ~/.redisclirc on the remote host. Use ssh_redis_keys to discover keys with SCAN, or \
+        reduce output. \
+        Auth: the REDISCLI_AUTH environment variable of the SSH host is used only for the \
+        local server (redis_host omitted, localhost or a loopback address); for any other \
+        redis_host give redis_password, or omit it for a server without a password. \
+        Use ssh_redis_keys to discover keys with SCAN, or \
         ssh_redis_cli for arbitrary read/write commands.";
 
     const SCHEMA: &'static str = r#"{
@@ -48,7 +52,11 @@ impl StandardTool for RedisInfoTool {
             },
             "redis_host": {
                 "type": "string",
-                "description": "Redis server hostname (default: localhost)"
+                "description": "Redis server host name or IP address (default: the local server). Letters, digits and . - _ : % only, at most 253 bytes. The REDISCLI_AUTH environment variable of the SSH host is used only when redis_host is omitted, localhost or a loopback address; for any other server it is not sent."
+            },
+            "redis_password": {
+                "type": "string",
+                "description": "Password for the server named by redis_host. It is sent to that server only and is not an argument of redis-cli (it reaches it on standard input), but it is part of the command line the remote shell runs (readable with ps on the target during the call) and of the command text in the bridge's audit log and history. Optional: omit it for a server without a password, or for a local server whose password the SSH host already provides in REDISCLI_AUTH. Not empty, no line breaks or other control characters, at most 1024 bytes."
             },
             "redis_port": {
                 "type": "integer",
@@ -85,7 +93,15 @@ impl StandardTool for RedisInfoTool {
             args.redis_host.as_deref(),
             args.redis_port,
             args.section.as_deref(),
+            args.redis_password.as_deref(),
         ))
+    }
+
+    fn validate(args: &SshRedisInfoArgs, _host_config: &HostConfig) -> Result<()> {
+        RedisCommandBuilder::validate_connection(
+            args.redis_host.as_deref(),
+            args.redis_password.as_deref(),
+        )
     }
 }
 
@@ -183,6 +199,7 @@ mod tests {
         assert!(properties.contains_key("save_output"));
         assert!(properties.contains_key("redis_host"));
         assert!(properties.contains_key("redis_port"));
+        assert!(properties.contains_key("redis_password"));
         assert!(properties.contains_key("section"));
     }
 
@@ -368,6 +385,121 @@ mod tests {
         let ctx = permissive_ctx(mock_output("mock output"));
         let result = handler
             .execute(Some(json!({"host": "server1"})), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    // ============== Stored credential stays on the local server ==============
+
+    /// Arguments of a valid call, with `extra` merged in.
+    fn args_with(extra: &serde_json::Value) -> serde_json::Value {
+        let mut value = json!({"host": "server1"});
+        if let (Some(map), Some(more)) = (value.as_object_mut(), extra.as_object()) {
+            map.extend(more.clone());
+        }
+        value
+    }
+
+    fn command_for(extra: &serde_json::Value) -> String {
+        let host_config = test_host_config();
+        let args: SshRedisInfoArgs = serde_json::from_value(args_with(extra)).expect("deserialize");
+        RedisInfoTool::validate(&args, &host_config).unwrap_or_else(|e| panic!("{extra}: {e:?}"));
+        RedisInfoTool::build_command(&args, &host_config).unwrap()
+    }
+
+    #[test]
+    fn test_other_server_without_password_unsets_the_ambient_credential() {
+        for host in ["redis.example.com", "10.0.0.5", "127.1"] {
+            let cmd = command_for(&json!({"redis_host": host}));
+            assert!(
+                cmd.starts_with(&format!(
+                    "unset REDISCLI_AUTH VALKEYCLI_AUTH && redis-cli -h '{host}'"
+                )),
+                "{cmd}"
+            );
+            assert!(!cmd.contains("--askpass"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_local_server_keeps_the_ambient_credential() {
+        for extra in [
+            json!({}),
+            json!({"redis_host": "localhost"}),
+            json!({"redis_host": "LOCALHOST"}),
+            json!({"redis_host": "127.0.0.1"}),
+            json!({"redis_host": "::1"}),
+            json!({"redis_host": "::ffff:127.0.0.1"}),
+        ] {
+            let cmd = command_for(&extra);
+            assert!(cmd.starts_with("redis-cli"), "{extra}: {cmd}");
+            assert!(!cmd.contains("unset"), "{extra}: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_password_goes_through_askpass_never_argv() {
+        for extra in [
+            json!({"redis_password": "s3cret"}),
+            json!({"redis_host": "localhost", "redis_password": "s3cret"}),
+            json!({"redis_host": "redis.example.com", "redis_password": "s3cret"}),
+        ] {
+            let cmd = command_for(&extra);
+            assert!(
+                cmd.contains("printf '%s\\n' 's3cret' | redis-cli --askpass"),
+                "{extra}: {cmd}"
+            );
+            assert!(!cmd.contains(" -a "), "{extra}: {cmd}");
+            assert_eq!(
+                cmd.starts_with("unset REDISCLI_AUTH VALKEYCLI_AUTH && "),
+                extra.get("redis_host") == Some(&json!("redis.example.com")),
+                "{extra}: {cmd}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_a_bad_redis_password() {
+        let handler = SshRedisInfoHandler::new();
+        let ctx = permissive_ctx(mock_output(""));
+        let too_long = "p".repeat(1025);
+        for password in ["", "a\nb", "a\rb", "a\0b", too_long.as_str()] {
+            let extra = json!({"redis_host": "redis.example.com", "redis_password": password});
+            let result = handler.execute(Some(args_with(&extra)), &ctx).await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("'redis_password'"), "{reason}");
+                }
+                e => panic!("Expected CommandDenied for {extra}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refuses_a_malformed_redis_host() {
+        let handler = SshRedisInfoHandler::new();
+        let ctx = permissive_ctx(mock_output(""));
+        let too_long = "a".repeat(254);
+        for redis_host in ["", "-x", "a b", "a,b", "é", "a;b", too_long.as_str()] {
+            let extra = json!({"redis_host": redis_host});
+            let result = handler.execute(Some(args_with(&extra)), &ctx).await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("'redis_host'"), "{redis_host:?}: {reason}");
+                }
+                e => panic!("Expected CommandDenied for {redis_host:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_other_server_with_password_runs() {
+        let handler = SshRedisInfoHandler::new();
+        let ctx = permissive_ctx(mock_output("mock output"));
+        let extra = json!({"redis_host": "redis.example.com", "redis_password": "s3cret"});
+        let result = handler
+            .execute(Some(args_with(&extra)), &ctx)
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));

@@ -152,9 +152,16 @@ jobs:
           # whether the answer can name a host the prefix does not select.
           # +60s total on a phase already near 66 minutes, which is the
           # cheapest promotion available: `BUILDER_TARGETS` costs 270s each.
+          #
+          # `fuzz_aws_args`, `fuzz_ldap_uri` and `fuzz_mount_options` joined
+          # with the rule on ambient credentials of the host: each asserts what
+          # an ACCEPTED argument may hold (no host path in `ssh_aws_cli`, one
+          # plain URI for the LDAP tools, no credential-source option or
+          # unquoted-key trick for a network `mount`). +90s in all.
           SECURITY_TARGETS="fuzz_command_validator fuzz_sanitizer fuzz_shell_escape \
             fuzz_security_config fuzz_yaml_config fuzz_host_config \
-            fuzz_whitelist_grant fuzz_completions_params"
+            fuzz_whitelist_grant fuzz_completions_params \
+            fuzz_aws_args fuzz_ldap_uri fuzz_mount_options"
 
           # Command-builder targets get the shell dictionary AND 300s.
           #

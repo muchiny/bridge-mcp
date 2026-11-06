@@ -28,7 +28,7 @@ use bridge_mcp::HelmCommandBuilder;
 // `cargo +nightly fuzz run fuzz_helm_command_builder -- -dict=fuzz/dicts/shell.dict`
 
 fuzz_target!(|data: &str| {
-    // Fuzz all 7 HelmCommandBuilder methods with arbitrary strings.
+    // Fuzz the 7 HelmCommandBuilder methods with arbitrary strings.
     // Invariant: output must always contain "helm" and never panic.
     //
     // Every `Option<&str>` and `&str` parameter is fed the fuzzed input:
@@ -151,6 +151,48 @@ fuzz_target!(|data: &str| {
         Some(data), // timeout
     );
     assert_arrives_as_text(&cmd, data, "uninstall");
+
+    // 8. `kubeconfig` is turned into a `KUBECONFIG=` prefix only for a file in
+    // a root-owned system directory or the standard `config` file of a home
+    // directory, exactly. The oracle is written out here, not taken from the
+    // validator: any other file of a `.kube` directory can be written by the
+    // SSH user, and a kubeconfig can point the client at another server.
+    let cmd = HelmCommandBuilder::build_list_command(
+        Some("helm"),
+        Some(data), // kubeconfig
+        None,
+        false,
+        false,
+        None,
+        None,
+        false,
+        false,
+        None,
+        None,
+    );
+    let system_dirs = [
+        "/etc/rancher/k3s/",
+        "/etc/rancher/rke2/",
+        "/etc/kubernetes/",
+        "/var/snap/microk8s/current/credentials/",
+        "/var/lib/k0s/pki/",
+    ];
+    let allowed = matches!(
+        data,
+        "/root/.kube/config" | "~/.kube/config" | "$HOME/.kube/config"
+    ) || system_dirs.iter().any(|dir| data.starts_with(dir));
+    if cmd.contains("KUBECONFIG=") {
+        assert!(allowed, "kubeconfig {data:?} reached the command: {cmd:?}");
+    }
+    if matches!(
+        data,
+        "/root/.kube/config" | "~/.kube/config" | "$HOME/.kube/config"
+    ) {
+        assert!(
+            cmd.starts_with(&format!("KUBECONFIG={data} ")),
+            "the standard kubeconfig must be kept: {cmd:?}"
+        );
+    }
 
     // Also test with auto-detect (None helm_bin) and everything else empty.
     let cmd = HelmCommandBuilder::build_list_command(

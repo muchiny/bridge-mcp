@@ -53,7 +53,15 @@ impl StandardTool for StorageMountTool {
         available block devices and partition names with ssh_storage_lsblk first. To unmount use \
         ssh_storage_umount; to make the mount persistent add it to /etc/fstab (visible via \
         ssh_storage_fstab). fs_type takes kernel filesystems and fixed-helper types only (no \
-        fuse types).";
+        fuse types). For network filesystems (cifs, smb3, nfs, nfs4, ceph, or a //server/share \
+        or host:path device) options must not select a credential source of the host \
+        (credentials, cred, cruid, multiuser, upcall_target, sec=krb5*, xprtsec=mtls, \
+        secretfile, conf, key) and must not contain a quote character: pass username= and \
+        password= explicitly. A ceph mount must pass exactly one secret= whose value is a \
+        CephX key (1 to 40 base64 characters). A cifs or smb3 mount ignores the PASSWD, \
+        PASSWD_FD, PASSWD_FILE, PASSWD2, PASSWD2_FD, PASSWD2_FILE and USER variables of the \
+        host. fs_type none is refused for a //, host: or @ device, and a device with @ needs \
+        fs_type, unless options has bind, rbind or move.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -76,7 +84,7 @@ impl StandardTool for StorageMountTool {
                     },
                     "options": {
                         "type": "string",
-                        "description": "Mount options (e.g., ro,noexec,nosuid)"
+                        "description": "Mount options (e.g., ro,noexec,nosuid). For network filesystems, credential-source options of the host (credentials=, cred=, cruid=, multiuser, upcall_target=, sec=krb5*, xprtsec=mtls, secretfile=, conf=, key=) and quote characters are refused: pass username= and password= explicitly. A ceph mount needs exactly one secret= whose value is a CephX key (1 to 40 base64 characters)"
                     },
                     "timeout_seconds": {
                         "type": "integer",
@@ -474,5 +482,118 @@ mod tests {
         .unwrap();
         let cmd = StorageMountTool::build_command(&args, &host).unwrap();
         assert_eq!(cmd, "mount -t 'zfs' -o 'ro,noatime' -- 'tank/data' '/data'");
+    }
+
+    #[tokio::test]
+    async fn test_credential_source_options_are_refused_through_the_handler() {
+        for (device, fs, opts) in [
+            (
+                "//server/share",
+                Some("cifs"),
+                "credentials=/etc/samba/creds",
+            ),
+            ("//server/share", None, "ro,cred=/root/.smbcreds"),
+            ("//server/share", Some("smb3"), "sec=krb5i"),
+            ("//server/share", Some("cifs"), "multiuser,cruid=0"),
+            ("server:/export", Some("nfs4"), "sec=krb5p"),
+            ("server:/export", None, "xprtsec=mtls"),
+            ("//server/share", Some("cifs"), "\"credentials\"=/srv/x"),
+            ("server:/export", Some("nfs"), "sec=\"krb5\""),
+        ] {
+            let handler = SshStorageMountHandler::new();
+            let ctx = crate::ports::mock::create_test_context_with_host();
+            let mut args = json!({
+                "host": "server1", "device": device, "mount_point": "/mnt", "options": opts
+            });
+            if let Some(fs) = fs {
+                args["fs_type"] = json!(fs);
+            }
+            let err = handler.execute(Some(args), &ctx).await.unwrap_err();
+            let BridgeError::CommandDenied { reason } = &err else {
+                panic!("{device} {fs:?} {opts}: {err:?}");
+            };
+            assert!(
+                reason.contains("Pass username= and password=")
+                    || reason.contains("quote character"),
+                "{reason}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ceph_without_a_secret_is_refused_through_the_handler() {
+        for opts in [
+            Some("name=admin"),
+            Some("secret="),
+            Some("\"secretfile\"=/srv/x"),
+            None,
+        ] {
+            let handler = SshStorageMountHandler::new();
+            let ctx = crate::ports::mock::create_test_context_with_host();
+            let mut args = json!({
+                "host": "server1", "device": "10.0.0.1:6789:/", "mount_point": "/mnt",
+                "fs_type": "ceph"
+            });
+            if let Some(opts) = opts {
+                args["options"] = json!(opts);
+            }
+            let err = handler.execute(Some(args), &ctx).await.unwrap_err();
+            let BridgeError::CommandDenied { reason } = &err else {
+                panic!("{opts:?}: {err:?}");
+            };
+            assert!(
+                reason.contains("Pass secret= explicitly") || reason.contains("quote character"),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_command_drops_the_ambient_cifs_passwords() {
+        for (fs, want) in [
+            (
+                "cifs",
+                "unset PASSWD PASSWD_FD PASSWD_FILE PASSWD2 PASSWD2_FD PASSWD2_FILE USER && \
+                 mount -t 'cifs' -- '//server/share' '/mnt/share'",
+            ),
+            (
+                "smb3",
+                "unset PASSWD PASSWD_FD PASSWD_FILE PASSWD2 PASSWD2_FD PASSWD2_FILE USER && \
+                 mount -t 'smb3' -- '//server/share' '/mnt/share'",
+            ),
+        ] {
+            let args: SshStorageMountArgs = serde_json::from_value(json!({
+                "host": "s", "device": "//server/share", "mount_point": "/mnt/share",
+                "fs_type": fs
+            }))
+            .unwrap();
+            assert_eq!(
+                StorageMountTool::build_command(&args, &test_host_config()).unwrap(),
+                want
+            );
+        }
+        let args: SshStorageMountArgs = serde_json::from_value(json!({
+            "host": "s", "device": "server:/export", "mount_point": "/mnt/share", "fs_type": "nfs"
+        }))
+        .unwrap();
+        assert_eq!(
+            StorageMountTool::build_command(&args, &test_host_config()).unwrap(),
+            "mount -t 'nfs' -- 'server:/export' '/mnt/share'"
+        );
+    }
+
+    #[test]
+    fn test_build_command_keeps_explicit_credentials() {
+        let args: SshStorageMountArgs = serde_json::from_value(json!({
+            "host": "s", "device": "//server/share", "mount_point": "/mnt/share",
+            "fs_type": "cifs", "options": "username=svc,password=pw,vers=3.1.1"
+        }))
+        .unwrap();
+        assert_eq!(
+            StorageMountTool::build_command(&args, &test_host_config()).unwrap(),
+            "unset PASSWD PASSWD_FD PASSWD_FILE PASSWD2 PASSWD2_FD PASSWD2_FILE USER && \
+             mount -t 'cifs' -o 'username=svc,password=pw,vers=3.1.1' -- '//server/share' \
+             '/mnt/share'"
+        );
     }
 }

@@ -1,5 +1,7 @@
 #![no_main]
 
+use std::net::IpAddr;
+
 use bridge_mcp::domain::use_cases::database::{DatabaseCommandBuilder, DatabaseType};
 use bridge_mcp_fuzz::{assert_arrives_as_text, assert_same_shell_skeleton};
 use libfuzzer_sys::fuzz_target;
@@ -36,33 +38,91 @@ use libfuzzer_sys::fuzz_target;
 // is pinned too. The flag is written unconditionally, so asserting it is true
 // for every input.
 //
+// Another server than the local one: a `db_host` that is not `localhost`,
+// a loopback address or, for PostgreSQL, a fixed socket directory must never be
+// handed a password or client certificate stored on the host. The builders
+// write a different shape for it (an `unset` prefix, `HOME=/nonexistent` and
+// `--defaults-file` for MySQL, `--local-infile=0`, `PGSSLCERT=/nonexistent` and
+// an empty or the caller's `PGPASSFILE` for PostgreSQL), and every builder is
+// checked in BOTH shapes. Every PostgreSQL client runs with `-w`, local or not,
+// and a socket directory gets `*` as the host field of its password line. The
+// classification is re-implemented here (`is_local_host`) on purpose: an oracle
+// that called the product's own function would agree with it by construction.
+// The benign build of the per-field comparison uses a host of the SAME shape as
+// the fuzzed one when the host is the field under test, since the two shapes
+// legitimately have different skeletons.
+//
 // Run with the dictionary or this explores very little:
 // `cargo +nightly fuzz run fuzz_db_command_builder -- -dict=fuzz/dicts/shell.dict`
 
+/// The PostgreSQL socket directories the product treats as local.
+const PG_SOCKET_DIRS: [&str; 2] = ["/var/run/postgresql", "/run/postgresql"];
+
+/// The `unset` prefix of a PostgreSQL command that connects to another server.
+const PG_UNSET: &str = "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && ";
+
+/// Whether `host` is the local server for the builders: `localhost`, a
+/// loopback address (IPv4-mapped IPv6 included) and, for PostgreSQL, a fixed
+/// socket directory.
+fn is_local_host(host: &str, is_mysql: bool) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return ip.to_canonical().is_loopback();
+    }
+    !is_mysql && PG_SOCKET_DIRS.contains(&host)
+}
+
 /// Assert that `data`, placed in any single one of the `n` fields while the
-/// others stay benign, adds no shell syntax to what `build` emits.
-fn assert_each_field_inert(context: &str, data: &str, n: usize, build: &dyn Fn(&[&str]) -> String) {
-    let benign_fields = vec!["x"; n];
-    let benign = build(&benign_fields[..]);
-    for i in 0..n {
-        let mut fields = vec!["x"; n];
-        fields[i] = data;
-        let hostile = build(&fields[..]);
-        assert_same_shell_skeleton(&benign, &hostile, &format!("{context}, field {i}"));
+/// others stay benign, adds no shell syntax to what `build` emits. Field 0 is
+/// the database host. The comparison runs with an other-server host and with a
+/// local host; when the host itself is under test, only against the shape its
+/// own value selects.
+fn assert_each_field_inert(
+    context: &str,
+    data: &str,
+    n: usize,
+    is_mysql: bool,
+    build: &dyn Fn(&[&str]) -> String,
+) {
+    for benign_host in ["x", "localhost"] {
+        let mut benign_fields = vec!["x"; n];
+        benign_fields[0] = benign_host;
+        let benign = build(&benign_fields[..]);
+        for i in 0..n {
+            if i == 0 && is_local_host(data, is_mysql) != (benign_host == "localhost") {
+                continue;
+            }
+            let mut fields = benign_fields.clone();
+            fields[i] = data;
+            let hostile = build(&fields[..]);
+            assert_same_shell_skeleton(
+                &benign,
+                &hostile,
+                &format!("{context}, host {benign_host}, field {i}"),
+            );
+        }
     }
 }
 
-/// How the password reaches the DB client, for any builder.
-fn check_password_plumbing(cmd: &str, data: &str, is_mysql: bool, with_pw: bool, context: &str) {
+/// How the password reaches the DB client, for any builder. `local` is whether
+/// the host of the build is the local server.
+fn check_password_plumbing(
+    cmd: &str,
+    data: &str,
+    is_mysql: bool,
+    with_pw: bool,
+    local: bool,
+    context: &str,
+) {
     // The password must not travel as a `MYSQL_PWD` / `PGPASSWORD` environment
-    // variable. FIND-031 moved these builders to `--defaults-extra-file` (MySQL)
-    // and `PGPASSFILE` (PostgreSQL) so the secret stays out of argv and environ
+    // variable. FIND-031 moved these builders to an option file (MySQL) and
+    // `PGPASSFILE` (PostgreSQL) so the secret stays out of argv and environ
     // of the DB client. It is still in the command STRING, as the `printf`
     // argument that writes the tempfile (the "Known gap" note in database.rs).
-    // This target used to assert `cmd.contains("MYSQL_PWD=")` — the pre-fix
-    // shape — so it demanded the vulnerability back. It would have failed on
-    // every input, and did not, because the fuzz harness had not compiled for
-    // six weeks.
+    // The assertion is on the ASSIGNMENT (`NAME=`): another-server commands
+    // legitimately carry `unset MYSQL_PWD` / `unset PGPASSWORD ...`.
     // Guarded on `data`: the builder pastes the fuzzed host, user, database and
     // query into the command as text, so an input that itself spells the token
     // puts it in the command without the builder ever writing it. Absent from
@@ -70,15 +130,18 @@ fn check_password_plumbing(cmd: &str, data: &str, is_mysql: bool, with_pw: bool,
     for token in ["MYSQL_PWD", "PGPASSWORD"] {
         if !data.contains(token) {
             assert!(
-                !cmd.contains(token),
+                !cmd.contains(&format!("{token}=")),
                 "{context}: password must not travel in {token}: {cmd}"
             );
         }
     }
     // The positive side, unconditional: the builder writes these itself.
     if with_pw {
-        let marker = if is_mysql {
+        let marker = if is_mysql && local {
             "--defaults-extra-file=$TMPF"
+        } else if is_mysql {
+            // Another server: the client reads the file of the call only.
+            "--defaults-file=$TMPF"
         } else {
             "PGPASSFILE=$TMPF "
         };
@@ -86,8 +149,17 @@ fn check_password_plumbing(cmd: &str, data: &str, is_mysql: bool, with_pw: bool,
             cmd.contains(marker),
             "{context}: password given but {marker:?} missing: {cmd}"
         );
-    } else {
-        // No password: no tempfile prelude at all (guarded on `data` as above).
+        // One-directional: the extra option file (read after the host's own
+        // files) is the local shape only.
+        if is_mysql && !local && !data.contains("--defaults-extra-file") {
+            assert!(
+                !cmd.contains("--defaults-extra-file"),
+                "{context}: another server: --defaults-extra-file present: {cmd}"
+            );
+        }
+    } else if local {
+        // No password, local server: no tempfile prelude at all (guarded on
+        // `data` as above).
         for token in ["PGPASSFILE", "TMPF"] {
             if !data.contains(token) {
                 assert!(
@@ -96,6 +168,81 @@ fn check_password_plumbing(cmd: &str, data: &str, is_mysql: bool, with_pw: bool,
                 );
             }
         }
+    } else if is_mysql {
+        // No password, another server: no option file at all.
+        assert!(
+            cmd.contains(" --no-defaults "),
+            "{context}: no password, another server: --no-defaults missing: {cmd}"
+        );
+        if !data.contains("TMPF") {
+            assert!(
+                !cmd.contains("TMPF"),
+                "{context}: no password but TMPF present: {cmd}"
+            );
+        }
+    } else {
+        // No password, another server (PostgreSQL): an EMPTY password file, so
+        // that no stored source is reachable.
+        assert!(
+            cmd.contains("PGPASSFILE=$TMPF "),
+            "{context}: no password, another server: PGPASSFILE missing: {cmd}"
+        );
+        if !data.contains("printf") {
+            assert!(
+                !cmd.contains("printf"),
+                "{context}: no password but a password line is written: {cmd}"
+            );
+        }
+    }
+
+    // The shape that depends on the host (the builder writes these itself, so
+    // unconditional where they are positive).
+    if local {
+        assert!(
+            !cmd.starts_with("unset "),
+            "{context}: local server but an unset prefix: {cmd}"
+        );
+        for token in [
+            "HOME=/nonexistent",
+            "MYSQL_TEST_LOGIN_FILE",
+            "--local-infile",
+            "PGSSLCERT",
+        ] {
+            if !data.contains(token) {
+                assert!(
+                    !cmd.contains(token),
+                    "{context}: local server but {token} present: {cmd}"
+                );
+            }
+        }
+    } else if is_mysql {
+        assert!(
+            cmd.starts_with("unset MYSQL_PWD && "),
+            "{context}: another server: unset prefix missing: {cmd}"
+        );
+        assert!(
+            cmd.contains("HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysql"),
+            "{context}: another server: ~/.my.cnf not hidden: {cmd}"
+        );
+    } else {
+        assert!(
+            cmd.starts_with(PG_UNSET),
+            "{context}: another server: unset prefix missing: {cmd}"
+        );
+        // `-w`: never prompt for a password. A prompt without a terminal is
+        // answered from standard input, which for a restore is the input file.
+        assert!(
+            cmd.contains("PGPASSFILE=$TMPF PGSSLCERT=/nonexistent psql -w -h ")
+                || cmd.contains("PGPASSFILE=$TMPF PGSSLCERT=/nonexistent pg_dump -w -h "),
+            "{context}: another server: PGSSLCERT or -w missing: {cmd}"
+        );
+    }
+    // `-w` on every PostgreSQL client, local or not (written by the builder).
+    if !is_mysql {
+        assert!(
+            cmd.contains("psql -w -h ") || cmd.contains("pg_dump -w -h "),
+            "{context}: PostgreSQL client without -w: {cmd}"
+        );
     }
 }
 
@@ -130,19 +277,43 @@ fuzz_target!(|data: &str| {
             let cmd = build(&all5[..]);
             // - The input must reach the command as text, not as syntax.
             assert_arrives_as_text(&cmd, data, &ctx);
-            assert_each_field_inert(&ctx, data, 5, &build);
-            check_password_plumbing(&cmd, data, is_mysql, with_pw, &ctx);
-            // The same checks on an all-benign build, where none of them is
-            // skipped: the fuzzed run above has to step aside whenever `data`
-            // spells one of the tokens, which the fuzzer does quickly.
-            check_password_plumbing(&build(&["x"; 5][..]), "x", is_mysql, with_pw, &ctx);
+            assert_each_field_inert(&ctx, data, 5, is_mysql, &build);
+            let local = is_local_host(data, is_mysql);
+            check_password_plumbing(&cmd, data, is_mysql, with_pw, local, &ctx);
+            if !is_mysql && with_pw {
+                // A socket directory gets `*` as the host field of its password
+                // line, every other host keeps its own (benign other fields).
+                for dir in PG_SOCKET_DIRS {
+                    let line = build(&[dir, "x", "x", "x", "x"]);
+                    assert!(
+                        line.contains("printf '%s:%s:%s:%s:%s\\n' '*' '5432' 'x' 'x' 'x'"),
+                        "{ctx}: socket directory {dir}: host field is not '*': {line}"
+                    );
+                }
+                let line = build(&["x", "x", "x", "x", "x"]);
+                assert!(
+                    line.contains("printf '%s:%s:%s:%s:%s\\n' 'x' '5432' 'x' 'x' 'x'"),
+                    "{ctx}: host field is not the host: {line}"
+                );
+            }
+            // The same checks on all-benign builds (another server, then the
+            // local one), where none of them is skipped: the fuzzed run above
+            // has to step aside whenever `data` spells one of the tokens, which
+            // the fuzzer does quickly.
+            let mut benign = ["x"; 5];
+            check_password_plumbing(&build(&benign[..]), "x", is_mysql, with_pw, false, &ctx);
+            benign[0] = "localhost";
+            check_password_plumbing(&build(&benign[..]), "x", is_mysql, with_pw, true, &ctx);
             if is_mysql {
                 // 6.0.0: `--binary-mode` switches the client's own commands
-                // (`\!`, `system`, ...) off. Written in both branches.
-                assert!(
-                    cmd.contains(" --binary-mode -e '"),
-                    "{ctx}: --binary-mode missing: {cmd}"
-                );
+                // (`\!`, `system`, ...) off. Written in both branches. Another
+                // server also gets `--local-infile=0`.
+                let tail = if local {
+                    " --binary-mode -e '"
+                } else {
+                    " --binary-mode --local-infile=0 -e '"
+                };
+                assert!(cmd.contains(tail), "{ctx}: {tail:?} missing: {cmd}");
             }
 
             // 2. Restore command. Fields: host, user, database, input file, password.
@@ -160,14 +331,20 @@ fuzz_target!(|data: &str| {
             let ctx = format!("{name} restore, password={with_pw}");
             let cmd = build(&all5[..]);
             assert_arrives_as_text(&cmd, data, &ctx);
-            assert_each_field_inert(&ctx, data, 5, &build);
-            check_password_plumbing(&cmd, data, is_mysql, with_pw, &ctx);
-            check_password_plumbing(&build(&["x"; 5][..]), "x", is_mysql, with_pw, &ctx);
+            assert_each_field_inert(&ctx, data, 5, is_mysql, &build);
+            let local = is_local_host(data, is_mysql);
+            check_password_plumbing(&cmd, data, is_mysql, with_pw, local, &ctx);
+            let mut benign = ["x"; 5];
+            check_password_plumbing(&build(&benign[..]), "x", is_mysql, with_pw, false, &ctx);
+            benign[0] = "localhost";
+            check_password_plumbing(&build(&benign[..]), "x", is_mysql, with_pw, true, &ctx);
             if is_mysql {
-                assert!(
-                    cmd.contains(" --binary-mode < "),
-                    "{ctx}: --binary-mode missing: {cmd}"
-                );
+                let tail = if local {
+                    " --binary-mode < "
+                } else {
+                    " --binary-mode --local-infile=0 < "
+                };
+                assert!(cmd.contains(tail), "{ctx}: {tail:?} missing: {cmd}");
             }
 
             // 3. Dump command. Fields: host, user, database, table, password, output file.
@@ -189,9 +366,21 @@ fuzz_target!(|data: &str| {
             let ctx = format!("{name} dump, password={with_pw}");
             let cmd = build(&all6[..]);
             assert_arrives_as_text(&cmd, data, &ctx);
-            assert_each_field_inert(&ctx, data, 6, &build);
-            check_password_plumbing(&cmd, data, is_mysql, with_pw, &ctx);
-            check_password_plumbing(&build(&["x"; 6][..]), "x", is_mysql, with_pw, &ctx);
+            assert_each_field_inert(&ctx, data, 6, is_mysql, &build);
+            let local = is_local_host(data, is_mysql);
+            check_password_plumbing(&cmd, data, is_mysql, with_pw, local, &ctx);
+            let mut benign = ["x"; 6];
+            check_password_plumbing(&build(&benign[..]), "x", is_mysql, with_pw, false, &ctx);
+            benign[0] = "localhost";
+            check_password_plumbing(&build(&benign[..]), "x", is_mysql, with_pw, true, &ctx);
+            // `mysqldump` refuses `--local-infile` on its command line: never
+            // written, whatever the host (guarded on `data`).
+            if !data.contains("local-infile") {
+                assert!(
+                    !cmd.contains("local-infile"),
+                    "{ctx}: dump must not carry --local-infile: {cmd}"
+                );
+            }
             // The builder's own structure (a dropped compression suffix), not
             // an injection property.
             assert!(
@@ -201,5 +390,71 @@ fuzz_target!(|data: &str| {
         }
     }
 
-    // 4. Should never panic (implicit)
+    // 4. `validate_connection` and the classification agree: a host accepted
+    //    WITHOUT a password is a local one (an other-server host without a
+    //    password would fall back to the credentials stored on the SSH host),
+    //    and a host accepted WITH one is a single name or address. (The
+    //    converse, that every name-like host is accepted, is not a property:
+    //    an other-server host also needs a password, and the user and database
+    //    rules apply, so only the "accepted implies" direction is asserted.)
+    //    A password accepted is at most 1024 bytes.
+    for (db_type, _, name, is_mysql) in &cases {
+        let accepted_without = DatabaseCommandBuilder::validate_connection(
+            db_type,
+            Some(data),
+            None,
+            "db",
+            None,
+            None,
+        )
+        .is_ok();
+        if accepted_without {
+            assert!(
+                is_local_host(data, *is_mysql),
+                "{name}: db_host {data:?} accepted without db_password but is not local"
+            );
+        }
+        let accepted_with = DatabaseCommandBuilder::validate_connection(
+            db_type,
+            Some(data),
+            None,
+            "db",
+            Some("pw"),
+            None,
+        )
+        .is_ok();
+        if accepted_with {
+            let socket_dir = !*is_mysql && PG_SOCKET_DIRS.contains(&data);
+            let name_like = !data.is_empty()
+                && data.len() <= 253
+                && data
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-_:%".contains(&b));
+            assert!(
+                socket_dir || name_like,
+                "{name}: db_host {data:?} accepted but is not one host name or address"
+            );
+        }
+    }
+
+    for (db_type, _, name, _) in &cases {
+        let accepted = DatabaseCommandBuilder::validate_connection(
+            db_type,
+            None,
+            None,
+            "db",
+            Some(data),
+            None,
+        )
+        .is_ok();
+        if accepted {
+            assert!(
+                data.len() <= 1024,
+                "{name}: db_password of {} bytes accepted",
+                data.len()
+            );
+        }
+    }
+
+    // 5. Should never panic (implicit)
 });

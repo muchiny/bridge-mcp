@@ -7,6 +7,402 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-11-07
+
+**7.0.0 is a major release because of its breaking changes, and it fixes the
+high-severity security advisory GHSA-gfj2-7f7r-r69w (the database tools
+presented the host's stored database credentials to a server chosen by the
+caller): upgrading is recommended.** The same rule now holds for the Redis
+tools (the host's `REDISCLI_AUTH` or `VALKEYCLI_AUTH`), the webhook tools
+(the host's `~/.curlrc`), the compose tools (the host's Git and registry
+credentials), `ssh_storage_mount` (Kerberos, credential files, `PASSWD`
+variables and TLS certificates of network file systems), `ssh_aws_cli` (the
+host's AWS identity, endpoint and files), `ssh_k8s_port_forward`,
+`ssh_traefik_introspect` and the Helm tools (`~/.curlrc` and kubeconfig
+files), `ssh_git_clone` and `ssh_git_pull` (`http.extraHeader` and the
+`GIT_SSL_*` client certificate variables) and the `ssh_ldap_*` tools (the TLS
+client certificate). The rule: an argument of the caller must not make a
+client on the target host present a credential of that host to a destination
+the caller chose, nor read or write the credential files of the host. The
+breaking changes are the refusals and command changes that close that
+advisory and that rule, and each says what to use instead.
+
+The count is 46 by the bar of 6.0.0 (its notes below give the rule):
+something that worked against 6.0.0 now needs a change. 38 are behaviour
+changes and 8 are in the library API, all in the `Breaking` bullets of
+`### Changed`. Not counted, by the same bar: `-w` on the PostgreSQL clients,
+which changes only a call that could not get a password anyway, the
+socket-directory password fix, the new `redis_password` argument and the new
+public validators (`RedisCommandBuilder::validate_connection` and the ones
+listed under `### Added`), which are additive, and the corrected tool
+descriptions.
+
+### Added
+
+- **`redis_password` on `ssh_redis_cli`, `ssh_redis_info` and
+  `ssh_redis_keys`.** The password of the server named by `redis_host`. It
+  goes to that server only, and `redis-cli` reads it from its standard input
+  (`--askpass`, which needs `redis-cli` 6.0 or later) instead of taking `-a`
+  on its command line. With it, the host's `REDISCLI_AUTH` is not used, for a
+  local server too. At most 1024 bytes, not empty, no line break or other
+  control character. Like `db_password`, it is part of the command the shell
+  runs, so it is readable with `ps` on the target for the duration of the
+  call, and it is in the command text of the bridge's audit log and history,
+  masked only when the sanitizer recognises it. `redis-cli` connects without
+  TLS, so the password crosses the network in clear to a remote server.
+
+- **New public validators in the library.** They hold the checks the tools
+  above now make. Their builders do not call them, except
+  `kubernetes::validate_port_forward_address`, which
+  `build_port_forward_command` calls itself and whose `Err` it returns: a
+  library caller must call the others first.
+  `DockerCommandBuilder::validate_compose_path(arg, value)`,
+  `PodmanCommandBuilder::validate_compose_file(file)`,
+  `CloudCommandBuilder::validate_aws_operation(service, subcommand)` and
+  `validate_aws_args(args)`,
+  `kubernetes::validate_port_forward_address(address)`,
+  `GitCommandBuilder::validate_pull_target(remote, branch)` and
+  `LdapCommandBuilder::validate_uri(uri)`.
+
+### Changed
+
+- **Breaking: the database tools (`ssh_db_query`, `ssh_db_dump`,
+  `ssh_db_restore`) use the host's stored credentials for the local server
+  only.** The local server is `localhost`, a loopback address (`127.0.0.0/8`,
+  `::1`, and the IPv4-mapped loopback `::ffff:127.0.0.0/104`, i.e.
+  `::ffff:127.x.y.z`) or, for PostgreSQL, `/var/run/postgresql` or
+  `/run/postgresql`. Each item below is one breaking change:
+  - A `db_host` naming another server is refused without a non-empty
+    `db_password` (give the password in the call; the credentials stored on the
+    host, such as `~/.my.cnf` or `~/.pgpass`, no longer stand in for it).
+  - `db_host` must be one host name or IP address: ASCII letters, digits and
+    `.`, `-`, `_`, `:`, `%` only, at most 253 bytes (or, for PostgreSQL, one of
+    the two socket directories above). Anything else is refused: a comma list,
+    `@`, `=`, quotes, spaces, non-ASCII characters, brackets around an IPv6
+    address (write `::1`, not `[::1]`) and any other socket directory (put the
+    server behind `localhost` or a loopback address instead).
+  - An empty `db_host` is refused (omit it for the local server).
+  - `db_password` is refused above 1024 bytes.
+  - For PostgreSQL, a call to another server is refused with an empty
+    `db_user` or `database` (give both: the password file line is matched on
+    them).
+  - For MySQL and MariaDB, a call to another server reads no option file but
+    the one built from the call (so `~/.my.cnf`, `~/.mylogin.cnf` and the
+    `/etc` and `MYSQL_HOME` option files, TLS settings included, do not
+    apply), ignores `MYSQL_PWD`, and `mysql` runs with `--local-infile=0`
+    (`mysqldump` does not accept that option, so it is not passed there; put
+    the user and password in the call).
+  - For PostgreSQL, a call to another server ignores `PGPASSWORD`,
+    `PGSERVICE`, `PGSERVICEFILE`, `PGSYSCONFDIR` and `PGHOSTADDR`, the
+    password file is the one built from `db_password`, and the client
+    certificate stored on the host (`~/.postgresql/postgresql.crt` or
+    `PGSSLCERT`) is not presented (put the user and password in the call).
+  - **Breaking (lib API):** `DatabaseCommandBuilder::build_query_command`,
+    `build_dump_command` and `build_restore_command` emit the shape above for
+    a `db_host` that is not the local server (their signatures are
+    unchanged); a caller that passes no password gets a command with no
+    option file (MySQL) or an empty password file (PostgreSQL), and
+    `validate_connection` refuses that case.
+- **Breaking: the Redis tools (`ssh_redis_cli`, `ssh_redis_info`,
+  `ssh_redis_keys`) use the host's `REDISCLI_AUTH` for the local server
+  only.** The local server is a call with no `redis_host`, `localhost` or a
+  loopback address (`127.0.0.0/8`, `::1`, `::ffff:127.x.y.z`). Each item below
+  is one breaking change:
+  - For any other `redis_host`, the command starts with
+    `unset REDISCLI_AUTH VALKEYCLI_AUTH &&` (`VALKEYCLI_AUTH` is read by
+    `valkey-cli`, which runs as `redis-cli` on distributions that ship
+    Valkey): `redis-cli` sends no password to that server
+    unless the call gives one (give `redis_password`; a Redis server without a
+    password needs nothing). The call is not refused when it has no password.
+    A call to the local server is unchanged.
+  - `redis_host` must be one host name or IP address: ASCII letters, digits
+    and `.`, `-`, `_`, `:`, `%` only, at most 253 bytes, not starting with
+    `-`. Anything else is refused, and so is an empty `redis_host` (omit it for
+    the local server). Brackets around an IPv6 address are refused too (write
+    `::1`, not `[::1]`).
+  - **Breaking (lib API):** `RedisCommandBuilder::build_info_command`,
+    `build_cli_command` and `build_keys_command` take a trailing
+    `redis_password: Option<&str>` (pass `None` for the former call), and
+    emit the `unset` prefix for a `redis_host` that is not the local server.
+- **Breaking: `ssh_webhook_send` and `ssh_notify` no longer read
+  `~/.curlrc`.** `curl` runs with `-q` as its first argument, so neither
+  `~/.curlrc` nor `$CURL_HOME/.curlrc` applies to the URL the caller names (a
+  `user`, `header`, `oauth2-bearer` or `netrc` line there used to be sent to
+  it). A proxy set in `~/.curlrc` is no longer used: set the `https_proxy`
+  environment variable of the SSH user instead, which `curl` still reads.
+- **Breaking: the compose tools (`ssh_docker_compose`, `ssh_podman_compose`)
+  accept only a local path for `file` and load no remote `include:`.**
+  Compose can read its project file from a Git repository, an `oci://`
+  reference, a `host:path` form, a `github.com/...` shorthand (on some
+  versions) or standard input, and an `include:` of a compose file can name
+  a Git or OCI resource. Fetching one of those makes the Git or registry
+  client of the host use its own credentials toward a server the caller
+  chose. Each item below is one breaking change:
+  - A `file` that is a remote reference or standard input (a Git or
+    `https://...git` URL, `ssh://`, `git://`, `git@host:path`, `oci://`,
+    `host:path`, `user@host/path`, `-`) is refused. Migration: put the file on
+    the host first (for example with `ssh_file_write`) and pass its local
+    path.
+  - A `file` with a character outside `[A-Za-z0-9/._-]` (a space, a quote,
+    `~`, `+`, a non-ASCII letter) or starting with `-` is refused. Migration:
+    use a path without such characters (rename the file, or add a symlink).
+  - A relative `file` with a directory part must start with `./` or `../`:
+    `deploy/compose.yml` is refused, because compose may read a value such
+    as `github.com/org/repo` as a Git reference (version-dependent).
+    Migration: write `./deploy/compose.yml` or an absolute path. A bare file
+    name (`prod.yml`) is unchanged.
+  - Compose runs with its Git and OCI remote loaders switched off: the
+    command starts with `COMPOSE_EXPERIMENTAL_GIT_REMOTE=false
+    COMPOSE_EXPERIMENTAL_OCI_REMOTE=false` in front of the compose program
+    (after `cd -- DIR &&` for Docker). An `include:` of a Git URL or an
+    `oci://` reference, inside a compose file that is already on the host,
+    now fails with "remote resource is disabled" instead of being fetched
+    with the Git or registry credentials of the host. The command line also
+    begins with the assignments, so a whitelist or audit pattern anchored on
+    `^podman compose` or on `&& docker compose` no longer matches. Migration:
+    fetch the remote file or artifact to the host yourself (for example with
+    `ssh_git_clone` or a registry pull) and `include:` the local copy; allow
+    the assignments in the pattern, for example
+    `^(COMPOSE_EXPERIMENTAL_\w+=false )*podman compose`.
+  - **Breaking (lib API):** `DockerCommandBuilder::build_compose_command` and
+    `PodmanCommandBuilder::build_compose_command` keep their signatures and
+    emit the assignments in front of the compose program. They do not
+    validate: a library caller must call
+    `DockerCommandBuilder::validate_compose_path` or
+    `PodmanCommandBuilder::validate_compose_file` first.
+- **Breaking: `ssh_storage_mount` refuses the options that make a network
+  file system use a credential of the host.** The rule covers `cifs`/`smb3`,
+  `nfs`/`nfs4`, `ceph`, and a mount with no type (or `auto`) whose device is
+  `//server/share` or `host:path`; for that last case the option
+  lists of the first three items below all apply, because `mount` picks the
+  type. The refused option names are compared without regard to case or
+  surrounding spaces. Credentials given in the call (`username=`,
+  `password=`, `user=`, `pass=`, `domain=`, `name=`, `sec=ntlmssp`,
+  `sec=none`, `guest`, `xprtsec=tls`, and `secret=` for `ceph`) and local
+  devices are unchanged. Each item below is one breaking change:
+  - On `cifs`/`smb3`: `credentials`, `cred`, `cruid`, `multiuser`,
+    `upcall_target`, and `sec=` with a flavor starting `krb5`, `lkey` or
+    `spkm3` are refused. Migration: pass `username=`, `password=` (and
+    `domain=`) in the call, or mount from an `/etc/fstab` entry.
+  - On `nfs`/`nfs4`: `sec=` with a flavor starting `krb5`, `lkey` or `spkm3`
+    (alone or in a `:` list) and `xprtsec=mtls` are refused. Migration: use
+    `sec=sys` or `xprtsec=tls`, or mount from an `/etc/fstab` entry.
+  - On `ceph`: `secretfile`, `conf` and `key` are refused. Migration: pass
+    `secret=`, or mount from an `/etc/fstab` entry.
+  - On `ceph` (an explicit `fs_type` that lists it): `options` must contain
+    exactly one `secret=` whose value is a CephX key, 1 to 40 characters of
+    `A-Z`, `a-z`, `0-9`, `+`, `/` and `=`, written exactly so (`Secret=`, or
+    `secret=` after a space, does not count), and a call with no `options` is
+    refused. Without it, or with a value `mount.ceph` does not keep (a longer
+    one, `<hidden>`), `mount.ceph` takes the key of the client name from a
+    keyring of the host. Migration: pass `secret=<key>`, or mount from an
+    `/etc/fstab` entry.
+  - `fs_type` `none` is refused for a device of a network form (`//`, `:` or
+    `@`), and a device with `@` (the `ceph` `name@fsid.fs=/path` form) is
+    refused when no type is fixed (absent or `auto`): `mount` reads `none` as
+    a pattern, and an untyped device of that form as a device to try with
+    every type listed in `/etc/filesystems`, which may include a network
+    type. Migration: give the type (`cifs`, `nfs`, `ceph`...). `none` stays
+    accepted for a local device, and for any device of a bind or move mount
+    (`bind`, `rbind` or `move` in `options`), which runs no helper.
+  - On any network file system (the types above and an autodetected
+    `//server/share` or `host:path` device): a `"` or `'` anywhere in
+    `options` is refused, because the mount helpers do not read a quoted key
+    or value as written, so a check of the keys could not see what they see.
+    Migration: write the options without quotes.
+  - On `cifs`/`smb3`, and on a `//server/share` device with no type (or
+    `auto`): the command starts with
+    `unset PASSWD PASSWD_FD PASSWD_FILE PASSWD2 PASSWD2_FD PASSWD2_FILE USER &&`,
+    because `mount.cifs` reads the `PASSWD` variables before `-o` and prefers
+    them over the `password=` of the call, and without `username=` takes the
+    whole of `USER` as the user name (which can carry `user%password`), so a
+    credential of the host would go to the server the caller chose. Without
+    `USER`, `mount.cifs` uses the login name of its uid. A password or user
+    name supplied this way to a caller-named server no longer applies, and a
+    whitelist or audit pattern anchored on `^mount` no longer matches.
+    Migration: pass `username=` and `password=` in the call; allow the prefix
+    in the pattern.
+  - **Breaking (lib API):** `StorageCommandBuilder::build_mount_command`
+    keeps its signature, now returns `Err(CommandDenied)` in the cases above,
+    and starts its output with the `unset` prefix for `cifs`/`smb3` and a
+    `//server/share` device.
+- **Breaking: `ssh_aws_cli` runs the AWS CLI with the identity and endpoint
+  configured on the host, and accepts only a fixed set of options and
+  `s3://` locations.** `args` is split into words and each word is quoted on
+  its own. The AWS CLI reads any unambiguous prefix of a global option, so an
+  option must be one of a fixed list of resource selectors and paging
+  options, matched exactly. The CLI may also
+  read an allowed name as a longer option of the same operation; none of
+  those chooses the endpoint, the profile, the signing or a file (checked
+  against awscli 1.46.3). Each item below is one breaking change:
+  - Any option not on the list is refused, abbreviations included (`--reg`
+    for `--region`), and so is every global option that chooses the
+    endpoint, the profile, the CA bundle, certificate checks, request
+    signing, input files or logging (`--endpoint-url`, `--profile`,
+    `--ca-bundle`, `--no-verify-ssl`, `--no-sign-request`, `--debug`,
+    `--v2-debug`, `--cli-*`, `--output`, `--color`, `--version`,
+    `--generate-cli-skeleton`). Migration: write the option in full from the
+    list (a call refused for an option other than `--output` prints it); set
+    endpoint, profile and CA on the host (`AWS_ENDPOINT_URL`, `AWS_PROFILE`,
+    `~/.aws/config`), or use `ssh_exec` for options outside the list.
+  - `args` is split into words: whitespace separates them, quotes group, a
+    backslash is a plain character, and an unterminated quote is refused.
+    Before, the whole string was one word, so a string with several options
+    never worked. Migration: quote a value that holds spaces, for example
+    `--query "Reservations[?State.Name=='running']"`.
+  - A parameter value that starts with `file://`, `fileb://`, `http://` or
+    `https://` is refused (the AWS CLI would load it from a file or a URL).
+    Migration: pass the value itself; to read a file, transfer it and use
+    `ssh_exec`.
+  - A word of `args` that is not an option, the value of one or an `s3://`
+    location is refused, so the tool reads and writes no file of the host.
+    A word after a flag (`--recursive`, `--dry-run`, `--no-dry-run`,
+    `--no-paginate`, `--human-readable`, `--summarize`) or after
+    `--name=value` is a positional word. The prefix is matched in lower case,
+    as the CLI does, and an `s3://` location must not have a `.` or `..`
+    segment. This covers a host path in `s3 cp`, `s3 mv` and `s3 sync`, and
+    any other positional word (`s3 ls mybucket`, `logs tail GROUP`).
+    Migration: transfer files to or from the host with `ssh_exec`; write
+    `s3://mybucket`, and name a key without `.` or `..` segments; for logs
+    use `logs filter-log-events --log-group-name GROUP`.
+  - The operations that write an output file of the host are refused:
+    `s3api get-object`, `s3api get-object-torrent`, `lambda invoke`,
+    `cloudfront get-function`, `iotwireless get-position-estimate` and
+    `eks update-kubeconfig` (it writes the kubeconfig of the host).
+    Migration: run them in an operator session on the host (`ssh_exec`,
+    under its own policy), or copy between buckets with
+    `s3 cp s3://... s3://...`.
+  - A `--region` value that is not a region name (`[a-z0-9-]{2,32}`) is
+    refused. Migration: pass the region name.
+  - The services `configure`, `sso`, `sso-oidc`, `login`, `logout` and
+    `history` are refused. Migration: configure the AWS identity on the host;
+    use `ssh_exec`, under its own policy, if you must run them.
+  - The operations that print or issue a credential or a bearer token are
+    refused: `sts` `get-session-token`, `get-federation-token` and the
+    `assume-role` family, `ecr` and `ecr-public` login and authorization
+    tokens, `codeartifact` authorization tokens and login, `iam`
+    `create-access-key` and the login-profile, service-specific credential
+    and virtual MFA operations, `s3 presign`, `ec2` `get-password-data` and
+    `create-key-pair`, `ec2-instance-connect`, the `lightsail` key pair,
+    access-details and master-password operations, `acm`
+    `export-certificate`, `apigateway` `get-api-key` and `get-api-keys` (the
+    CLI reads the allowed `--include` as `--include-value(s)` there and prints
+    the key values), the `quicksight` embed URLs, `emr` `ssh`, `socks`,
+    `put` and `get`, `cloudfront sign`, and any subcommand whose name holds
+    `access-token`, `auth-token`, `authorization-token`, `credentials`,
+    `federation-token`, `get-token`, `login-password`, `open-id-token`,
+    `presign` or `session-token` (such as `eks get-token`).
+    `sts get-caller-identity`, `iam get-credential-report`,
+    `iam list-access-keys` and `eks describe-cluster` stay available.
+    Migration: run the refused ones in an operator session on the host
+    (`ssh_exec`, under its own policy).
+  - **Breaking (lib API):** `CloudCommandBuilder::build_aws_cli_command`
+    keeps its signature and now emits one quoted word per word of `args`; it
+    does not validate, so a library caller must call
+    `CloudCommandBuilder::validate_aws_operation` and `validate_aws_args`
+    first.
+- **Breaking: the Kubernetes and Helm tools no longer aim a client of the host
+  at a destination of the caller's choosing while it uses the host's
+  credential files.** Each item below is one breaking change:
+  - The `address` of `ssh_k8s_port_forward` must be `localhost` (lower case
+    only: `kubectl` refuses `LOCALHOST`), `127.0.0.1`, `::1` (or another
+    loopback address) or a comma-separated list of those. Any other value,
+    `0.0.0.0` and the empty string included, is refused. Migration: omit
+    `address` (`kubectl` then binds `localhost`), or use `localhost` in lower
+    case or a loopback address; to expose a port beyond the host, run
+    `kubectl port-forward --address ...` through `ssh_exec`.
+  - The probe of `ssh_k8s_port_forward` and the request of
+    `ssh_traefik_introspect` run `curl -q`, so the host's `~/.curlrc` is not
+    read (a proxy, headers or credentials set there no longer apply).
+    Migration: if the probe relied on a `.curlrc` setting, run `curl`
+    yourself through `ssh_exec`.
+  - A Helm `kubeconfig` (all ten `ssh_helm_*` tools) is accepted only from the
+    system directories (`/etc/rancher/k3s/`, `/etc/rancher/rke2/`,
+    `/etc/kubernetes/`, `/var/snap/microk8s/current/credentials/`,
+    `/var/lib/k0s/pki/`) or as exactly `/root/.kube/config`,
+    `~/.kube/config` or `$HOME/.kube/config`. Any other file under a `.kube`
+    directory (for example `~/.kube/prod.yaml`) is refused. Migration: omit
+    `kubeconfig` (the client reads `~/.kube/config` by default), or point it
+    at a root-owned copy under one of the system directories.
+  - **Breaking (lib API):** the signatures of `build_port_forward_command`,
+    `build_traefik_introspect_command`, `validate_kubeconfig`,
+    `validate_kubeconfig_opt` and `kubeconfig_env_prefix` are unchanged. The
+    first now returns `Err` for an `address` that is not loopback, both
+    builders emit `curl -q`, and the last three accept fewer values.
+- **Breaking: `ssh_git_pull` takes only the name of a remote, and the git
+  tools no longer send an unscoped `http.extraHeader` or the
+  `GIT_SSL_*` client certificate of the environment.** Each item below is
+  one breaking change:
+  - `remote` must be the name of a remote configured in the repository:
+    ASCII letters, digits, `.`, `-` and `_`, not starting with `.` or `-`. A
+    URL, a path or a name with a `/` (for example `team/fork`) is refused.
+    Migration: configure the remote in the repository and pass its name, or
+    use `ssh_git_clone` for a URL.
+  - `branch` without `remote` is refused, because git reads the first
+    positional argument as the repository; it only worked when a remote had
+    the branch's name. Migration: pass `remote` too (for example `origin`).
+  - `ssh_git_clone` and `ssh_git_pull` start git with
+    `-c http.extraHeader=`, so a header that the host's git configuration
+    applies to every server (`~/.gitconfig`, `/etc/gitconfig`) is not sent.
+    Migration: scope it to the server, as
+    `[http "https://git.example.org/"] extraHeader = ...`; a credential
+    helper keyed by host or a `~/.netrc` `machine` entry also works.
+  - `ssh_git_clone` and `ssh_git_pull` start with
+    `unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED &&`, so
+    a client certificate that the environment of the SSH user supplies is not
+    presented to the server the caller names (an unscoped `http.sslCert` or
+    `http.sslKey` in the git configuration still is, see `SECURITY.md`). A
+    whitelist or audit pattern anchored on `^git` no longer matches.
+    Migration: give the certificate in a git configuration scoped to the
+    server (`http.<url>.sslCert`, `http.<url>.sslKey`); allow the prefix in
+    the pattern.
+  - **Breaking (lib API):** `GitCommandBuilder::build_pull_command` and
+    `build_clone_command` keep their signatures and emit the `unset` prefix
+    and the `-c http.extraHeader=` option; `build_pull_command` also puts
+    `--` before the remote and branch and ignores `branch` when `remote` is
+    `None`. They do not validate: a library caller must call
+    `GitCommandBuilder::validate_pull_target` first.
+- **Breaking: the LDAP tools (`ssh_ldap_search`, `ssh_ldap_add`,
+  `ssh_ldap_modify`, `ssh_ldap_user_info`, `ssh_ldap_group_members`) present
+  the TLS client certificate of the host to a server of the host only.** They
+  bind with `-x` (a simple anonymous bind: no bind DN, no password, no SASL),
+  so the one credential that could go out is the certificate named by
+  `TLS_CERT` and `TLS_KEY` in a user `ldaprc`, or by `LDAPTLS_CERT` and
+  `LDAPTLS_KEY`. The local server is an `ldapi://` socket, or `ldap://` or
+  `ldaps://` with `localhost` or a loopback address. Each item below is one
+  breaking change:
+  - `uri` must be one `ldap://`, `ldaps://` or `ldapi://` URI of the form
+    `scheme://host[:port]`. A list (space or comma separated), user
+    information, a path, a query, extensions and an empty host (`ldap:///`)
+    are refused, and so are an `ldapi://` socket path that is not %-escaped,
+    an IPv6 address without brackets and a `uri` over 255 bytes. Migration:
+    pass one `scheme://host[:port]`, one call per server; write an IPv6
+    address in brackets (`ldap://[::1]`, not `ldap://::1`) and an `ldapi`
+    socket path %-escaped (`ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi`, not
+    `ldapi:///var/run/slapd/ldapi`); omit `uri` to use the server of the
+    host's `ldap.conf`.
+  - For a `uri` that is not local, the command starts with
+    `LDAPTLS_CERT= LDAPTLS_KEY=`, so no client certificate is presented;
+    `TLS_CACERT` and `TLS_REQCERT` still apply. A remote `ldaps://` server
+    that requires a client certificate no longer authenticates the tool.
+    Migration: use a server that does not require one, or omit `uri` (the
+    server and certificate then come from the host's own `ldap.conf`).
+  - **Breaking (lib API):** the builders of `LdapCommandBuilder` keep their
+    signatures; for a `uri` that is not local they emit the
+    `LDAPTLS_CERT= LDAPTLS_KEY=` prefix, and a `uri` that does not parse is
+    treated as not local. They do not validate: a library caller must call
+    `LdapCommandBuilder::validate_uri` first.
+- **PostgreSQL: `psql` and `pg_dump` always run with `-w`** (never prompt for
+  a password), local calls included. A call that needs a password and has
+  none fails at once instead of prompting: with no terminal, `psql` read the
+  answer from standard input, which for `ssh_db_restore` is the input file.
+
+- **Tool descriptions corrected.** The five `ssh_ldap_*` tools said they
+  authenticate with the host's `ldap.conf` or SASL (EXTERNAL, GSSAPI). They
+  always did a simple anonymous bind (`-x`); the text now says so. The
+  `kubeconfig` argument of the ten `ssh_helm_*` tools now lists
+  `/var/lib/k0s/pki/`, which the validator already accepted.
+
 ### Fixed
 
 - **The nightly fuzz job passes again on 6.0.0.** The first nightly run after
@@ -39,6 +435,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The write branch of `fuzz_vault_command_builder` could never run once
     `build_write_command` started validating its entries. The target now also
     checks the `--` separator and the JSON heredoc body.
+- **A PostgreSQL call with `db_host` set to `/var/run/postgresql` or
+  `/run/postgresql` and a `db_password` now uses that password.** libpq looks
+  up its own default socket directory as `localhost` in the password file, so
+  the line the tool wrote under the directory name never matched there. The
+  line now has `*` as its host field.
+
+### Security
+
+- **The database tools no longer present a password or PostgreSQL client
+  certificate stored on the host to a server named by the caller**
+  (`db_host`).
+- **The Redis tools no longer present the host's `REDISCLI_AUTH` or
+  `VALKEYCLI_AUTH` to a server named by the caller** (`redis_host`), and **the
+  webhook tools (`ssh_webhook_send`, `ssh_notify`) no longer apply the host's
+  `~/.curlrc` (credentials, headers, `netrc`) to a URL named by the caller.**
+- **The compose tools no longer fetch their project file, or an `include:`
+  of a compose file, from a remote source.** `file` is a local path and the
+  Git and OCI loaders of compose are off, so the Git or registry client of
+  the host is not used with its own credentials toward a server named by the
+  caller.
+- **`ssh_storage_mount` no longer lets the caller select a credential source
+  of the host for a network file system** (credential files, Kerberos, the
+  `PASSWD` variables of `mount.cifs`, a TLS client certificate, a Ceph key
+  file, configuration or keyring). Credentials in the call are used.
+- **`ssh_aws_cli` no longer lets the caller choose the endpoint, profile or
+  certificate checks of the AWS CLI, load a parameter from a file or URL,
+  read or write a file of the host, or run an operation that prints or issues
+  a credential.** It runs with the identity and endpoint configured on the
+  host.
+- **`ssh_k8s_port_forward` binds loopback addresses only, its probe and
+  `ssh_traefik_introspect` no longer read the host's `~/.curlrc`, and the
+  Helm tools read a `kubeconfig` only from the system directories or the
+  standard `config` file of a home directory.**
+- **`ssh_git_clone` and `ssh_git_pull` no longer send a header that the
+  host's git configuration applies to every server, nor the client
+  certificate of the `GIT_SSL_*` variables, and `ssh_git_pull` takes only the
+  name of a configured remote, never a URL or a path.**
+- **The `ssh_ldap_*` tools no longer present the host's TLS client
+  certificate to a server that is not on the host, and accept one
+  `scheme://host[:port]` as `uri`.**
 
 ## [6.0.0] - 2026-11-05
 
@@ -6189,7 +6625,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v6.0.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v7.0.0...HEAD
+[7.0.0]: https://github.com/muchiny/bridge-mcp/compare/v6.0.0...v7.0.0
 [6.0.0]: https://github.com/muchiny/bridge-mcp/compare/v5.0.1...v6.0.0
 [5.0.1]: https://github.com/muchiny/bridge-mcp/compare/v5.0.0...v5.0.1
 [5.0.0]: https://github.com/muchiny/bridge-mcp/compare/v4.1.0...v5.0.0

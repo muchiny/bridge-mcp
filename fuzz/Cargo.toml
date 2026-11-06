@@ -405,3 +405,24 @@ path = "fuzz_targets/fuzz_network_equipment_builder.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_aws_args"
+path = "fuzz_targets/fuzz_aws_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ldap_uri"
+path = "fuzz_targets/fuzz_ldap_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mount_options"
+path = "fuzz_targets/fuzz_mount_options.rs"
+test = false
+doc = false
+bench = false

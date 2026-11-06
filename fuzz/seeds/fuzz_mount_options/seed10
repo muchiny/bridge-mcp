@@ -1,0 +1,3 @@
+nfs
+server:/export
+sec="sys"

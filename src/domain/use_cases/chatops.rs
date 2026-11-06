@@ -10,6 +10,17 @@ fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
 }
 
+/// Start of every webhook `curl` command, shared by the two builders.
+///
+/// `-q` must be the first argument of `curl`: it is then honoured and curl
+/// reads neither `~/.curlrc` nor `$CURL_HOME/.curlrc`. The URL is chosen by the
+/// caller of the tool, so no setting of the host's curl configuration file
+/// (`user`, `header`, `oauth2-bearer`, `netrc`, a client certificate...) may
+/// apply to it. The `https_proxy` and `HTTPS_PROXY` environment variables still
+/// apply. `--globoff`: without it `[1-100000000]` and `{a,b}` in the URL are
+/// expanded into one request per value.
+const CURL_POST_JSON: &str = "curl -q -s -X POST --globoff -H 'Content-Type: application/json'";
+
 /// Validate a webhook URL.
 ///
 /// # Errors
@@ -73,8 +84,9 @@ pub struct ChatOpsCommandBuilder;
 impl ChatOpsCommandBuilder {
     /// Build a command to send a webhook POST request.
     ///
-    /// curl runs with `--globoff`: without it `[1-100000000]` and `{a,b}` in
-    /// the URL are expanded into one request per value.
+    /// curl runs with `-q` (it reads no `~/.curlrc`) and `--globoff` (no
+    /// expansion of `[1-100000000]` and `{a,b}` in the URL into one request
+    /// per value).
     ///
     /// # Errors
     ///
@@ -87,7 +99,7 @@ impl ChatOpsCommandBuilder {
         let escaped_payload = shell_escape(payload);
 
         Ok(format!(
-            "curl -s -X POST --globoff -H 'Content-Type: application/json' \
+            "{CURL_POST_JSON} \
              -d {escaped_payload} {escaped_url} \
              -w '\\nHTTP_STATUS:%{{http_code}}' -o /dev/stdout"
         ))
@@ -96,7 +108,7 @@ impl ChatOpsCommandBuilder {
     /// Build a command to send a notification via webhook.
     ///
     /// Formats the message as a JSON notification payload and sends it
-    /// (curl runs with `--globoff`, see [`Self::build_webhook_command`]).
+    /// (curl runs with `-q` and `--globoff`, see [`Self::build_webhook_command`]).
     ///
     /// # Errors
     ///
@@ -129,7 +141,7 @@ impl ChatOpsCommandBuilder {
              TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date) && \
              PAYLOAD=$(printf '{{\"text\":%s,\"hostname\":\"%s\",\"timestamp\":\"%s\"}}' \
              {escaped_message} \"$HOSTNAME\" \"$TIMESTAMP\") && \
-             curl -s -X POST --globoff -H 'Content-Type: application/json' \
+             {CURL_POST_JSON} \
              -d \"$PAYLOAD\" {escaped_url} \
              -w '\\nHTTP_STATUS:%{{http_code}}' -o /dev/stdout"
         ))
@@ -214,7 +226,7 @@ mod tests {
             "{\"text\":\"hello\"}",
         )
         .unwrap();
-        assert!(cmd.contains("curl -s -X POST"));
+        assert!(cmd.contains("curl -q -s -X POST"));
         assert!(cmd.contains("Content-Type: application/json"));
         assert!(cmd.contains("hooks.slack.com"));
     }
@@ -289,7 +301,7 @@ mod tests {
             "https://hooks.slack.com/services/T/B/X",
         )
         .unwrap();
-        assert!(cmd.contains("curl -s -X POST"));
+        assert!(cmd.contains("curl -q -s -X POST"));
         assert!(cmd.contains("hostname"));
         assert!(cmd.contains("timestamp"));
         assert!(cmd.contains("Server restarted"));
@@ -347,5 +359,48 @@ mod tests {
         let flag = cmd.find("--globoff").unwrap();
         let url = cmd.find("'https://example.com/h'").unwrap();
         assert!(flag < url, "{cmd}");
+    }
+
+    // ── curl configuration file ───────────────────────────────
+
+    #[test]
+    fn test_curl_q_is_the_first_curl_argument() {
+        let url = "https://hooks.slack.com/services/T/B/X";
+        let webhook = ChatOpsCommandBuilder::build_webhook_command(url, "{}").unwrap();
+        assert!(webhook.starts_with("curl -q "), "{webhook}");
+        assert_eq!(webhook.matches("curl").count(), 1, "{webhook}");
+
+        // The notification command sets variables first: its one curl is the
+        // last link of the `&&` chain, and `-q` is still its first argument.
+        let notify = ChatOpsCommandBuilder::build_notify_command("hi", url).unwrap();
+        assert!(notify.contains(" && curl -q -s -X POST "), "{notify}");
+        assert_eq!(notify.matches("curl").count(), 1, "{notify}");
+    }
+
+    #[test]
+    fn test_both_builders_share_the_curl_prefix() {
+        let url = "https://hooks.slack.com/services/T/B/X";
+        let webhook = ChatOpsCommandBuilder::build_webhook_command(url, "{}").unwrap();
+        let notify = ChatOpsCommandBuilder::build_notify_command("hi", url).unwrap();
+        assert!(webhook.starts_with(CURL_POST_JSON), "{webhook}");
+        assert!(
+            notify.contains(&format!(" && {CURL_POST_JSON} ")),
+            "{notify}"
+        );
+        assert_eq!(
+            CURL_POST_JSON,
+            "curl -q -s -X POST --globoff -H 'Content-Type: application/json'"
+        );
+    }
+
+    #[test]
+    fn test_webhook_golden_command() {
+        assert_eq!(
+            ChatOpsCommandBuilder::build_webhook_command("https://example.com/h", "{\"a\":1}")
+                .unwrap(),
+            "curl -q -s -X POST --globoff -H 'Content-Type: application/json' \
+             -d '{\"a\":1}' 'https://example.com/h' \
+             -w '\\nHTTP_STATUS:%{http_code}' -o /dev/stdout"
+        );
     }
 }

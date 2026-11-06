@@ -58,8 +58,8 @@ enum Raw {
     /// must reach that `sh -c` as one quoted word, and its content is not
     /// checked again.
     Inner,
-    /// The value is a list of options by design: it must stay one quoted
-    /// word, and it may start with `-`.
+    /// The value is a list of options by design: its words are quoted one by
+    /// one, and it may start with `-`.
     Options,
 }
 
@@ -78,7 +78,9 @@ const RAW_BY_DESIGN: &[(&str, &str, Raw)] = &[
     ("ssh_podman_exec", "command", Raw::Inner),
     ("ssh_crictl_exec", "command", Raw::Inner),
     ("ssh_k8s_exec", "command", Raw::Inner),
-    // `--region eu-west-1 --output json`, as the schema documents.
+    // Whitespace-separated options from an allow-list (`--region eu-west-1
+    // --instance-ids i-1`): each word is quoted on its own, and a value the
+    // sweep builds (quotes, a leading dash) is refused before any command.
     ("ssh_aws_cli", "args", Raw::Options),
     // Device CLI text for a host tagged `network-equipment`, not a shell.
     ("ssh_net_equip_config", "commands", Raw::Whole),
@@ -941,6 +943,24 @@ const TOOL_SAMPLES: &[(&str, &str, &str)] = &[
     ("ssh_awx_resolve", "kind", "job_templates"),
     ("ssh_terraform_state", "subcommand", "list"),
     ("ssh_redis_cli", "command", "PING"),
+    // A `branch` needs a `remote` (the validator refuses it otherwise), so
+    // the sweep's hostile `branch` still reaches the builder and is audited
+    // as `-- 'origin' '<branch>'`.
+    ("ssh_git_pull", "remote", "origin"),
+    // Valid values for the arguments that refuse anything else, so that the
+    // hostile value of another argument is audited with the command shape
+    // they select (the cifs `unset` prefix, the LDAP client-certificate
+    // prefix, the per-word aws quoting, `--address`, a compose `-f`).
+    ("ssh_storage_mount", "device", "//server/share"),
+    ("ssh_ldap_add", "uri", "ldap://ldap.example.com"),
+    ("ssh_ldap_group_members", "uri", "ldap://ldap.example.com"),
+    ("ssh_ldap_modify", "uri", "ldap://ldap.example.com"),
+    ("ssh_ldap_search", "uri", "ldap://ldap.example.com"),
+    ("ssh_ldap_user_info", "uri", "ldap://ldap.example.com"),
+    ("ssh_k8s_port_forward", "address", "localhost"),
+    ("ssh_docker_compose", "file", "./c.yml"),
+    ("ssh_podman_compose", "file", "./c.yml"),
+    ("ssh_aws_cli", "args", "--region eu-west-1 s3://b/k"),
     ("ssh_template_diff", "current_path", "/etc/x.conf"),
     ("ssh_template_apply", "dest", "/etc/x.conf"),
     ("ssh_template_validate", "service", "redis"),

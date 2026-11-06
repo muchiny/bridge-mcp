@@ -56,6 +56,10 @@ impl StandardTool for DockerComposeTool {
     const DESCRIPTION: &'static str = "Manage Docker Compose stacks on a remote host. Actions: up (start/create), down \
         (stop/remove), restart, ps (list services), logs (view output), pull (update images), \
         build (rebuild). Specify project_dir as the path containing docker-compose.yml. \
+        file, when given, is a local path on the host (letters, digits, '/', '.', '_', '-'; \
+        relative paths with a directory part start with './'): URLs, Git and OCI references \
+        and 'host:path' forms are refused. Remote Git and OCI includes named inside a compose \
+        file are not loaded (compose runs with its remote loaders switched off). \
         Auto-detects docker compose v2 or docker-compose v1.";
 
     const SCHEMA: &'static str = r#"{
@@ -76,7 +80,7 @@ impl StandardTool for DockerComposeTool {
             },
             "file": {
                 "type": "string",
-                "description": "Alternative compose file name (default: docker-compose.yml)"
+                "description": "Alternative compose file: a local path on the remote host made of letters, digits, '/', '.', '_' and '-' (absolute, or relative to project_dir; a relative path with a directory part starts with './'). URLs, Git/OCI references and 'host:path' forms are refused. Default: docker-compose.yml"
             },
             "services": {
                 "type": "array",
@@ -121,6 +125,9 @@ impl StandardTool for DockerComposeTool {
 
     fn validate(args: &SshDockerComposeArgs, _host_config: &HostConfig) -> Result<()> {
         DockerCommandBuilder::validate_compose_action(&args.action)?;
+        if let Some(file) = &args.file {
+            DockerCommandBuilder::validate_compose_path("file", file)?;
+        }
         for service in args.services.iter().flatten() {
             refuse_option_like("services", service)?;
         }
@@ -461,6 +468,74 @@ mod tests {
             err.to_string()
                 .contains("'services' must not start with '-'"),
             "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remote_compose_file_is_refused() {
+        let handler = SshDockerComposeHandler::new();
+        let ctx = crate::ports::mock::create_test_context_with_host();
+        for file in [
+            "https://example.com/org/repo.git",
+            "git@example.com:org/repo.git",
+            "oci://registry.example.com/stack:latest",
+            "github.com/org/repo",
+            "example.com:compose.yml",
+            "-",
+            "",
+        ] {
+            let args = json!({
+                "host": "server1", "action": "up", "project_dir": "/opt/app", "file": file
+            });
+            let err = handler.execute(Some(args), &ctx).await.unwrap_err();
+            let BridgeError::CommandDenied { reason } = &err else {
+                panic!("{file:?}: {err:?}");
+            };
+            assert!(reason.contains("'file'"), "{file:?}: {reason}");
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_local_compose_files() {
+        for file in [
+            "prod.yml",
+            "/srv/stack/compose.yaml",
+            "./deploy/compose.yml",
+        ] {
+            let args: SshDockerComposeArgs = serde_json::from_value(json!({
+                "host": "server1", "action": "up", "project_dir": "/app", "file": file
+            }))
+            .unwrap();
+            let verdict = DockerComposeTool::validate(&args, &test_host_config());
+            assert!(verdict.is_ok(), "{file}");
+        }
+    }
+
+    #[test]
+    fn test_build_command_golden_with_file() {
+        let args: SshDockerComposeArgs = serde_json::from_value(json!({
+            "host": "server1", "action": "up", "project_dir": "/app",
+            "file": "prod.yml", "compose_bin": "docker compose"
+        }))
+        .unwrap();
+        assert_eq!(
+            DockerComposeTool::build_command(&args, &test_host_config()).unwrap(),
+            "cd -- '/app' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+             COMPOSE_EXPERIMENTAL_OCI_REMOTE=false docker compose -f 'prod.yml' up --detach"
+        );
+    }
+
+    #[test]
+    fn test_build_command_golden_without_file() {
+        let args: SshDockerComposeArgs = serde_json::from_value(json!({
+            "host": "server1", "action": "ps", "project_dir": "/app",
+            "compose_bin": "docker-compose"
+        }))
+        .unwrap();
+        assert_eq!(
+            DockerComposeTool::build_command(&args, &test_host_config()).unwrap(),
+            "cd -- '/app' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+             COMPOSE_EXPERIMENTAL_OCI_REMOTE=false docker-compose ps"
         );
     }
 }

@@ -15,7 +15,7 @@ use regex::Regex;
 use crate::config::ShellType;
 use crate::error::{BridgeError, Result};
 
-use super::shell::refuse_option_like;
+use super::shell::{is_loopback_host, refuse_option_like};
 
 /// `SQL` comments (block, `-- ` and `#` line): replaced by a space before the
 /// deny list runs, so `DROP/**/TABLE t` is read as `DROP TABLE t`.
@@ -181,6 +181,9 @@ fn write_mysql_password_tempfile(cmd: &mut String, password: &str) {
 /// The pgpass format permits `:` and `\\` in the password, but they must
 /// be escaped with a backslash. We perform that escaping here in addition
 /// to the single-quote escape for the `printf` format-arg.
+///
+/// The host field is `db_host`, except for a socket directory (one of
+/// [`PG_SOCKET_DIRS`]), where it is `*`.
 fn write_pg_password_tempfile(
     cmd: &mut String,
     db_host: &str,
@@ -196,10 +199,18 @@ fn write_pg_password_tempfile(
     // pgpass-format escaping first, then the POSIX single-quote escape — the
     // three values are emitted as single-quoted `printf` arguments just like
     // the password, and a bare `'` used to close the quoting.
-    let printf_host = db_host
-        .replace('\\', "\\\\")
-        .replace(':', "\\:")
-        .replace('\'', "'\\''");
+    let printf_host = if PG_SOCKET_DIRS.contains(&db_host) {
+        // A socket directory: `libpq` matches its compile-time default directory
+        // as `localhost` and any other one literally, so the path itself would
+        // not match on every distribution. The file holds only this line, so a
+        // wildcard host field cannot select another entry.
+        "*".to_string()
+    } else {
+        db_host
+            .replace('\\', "\\\\")
+            .replace(':', "\\:")
+            .replace('\'', "'\\''")
+    };
     let printf_db = database
         .replace('\\', "\\\\")
         .replace(':', "\\:")
@@ -216,6 +227,130 @@ fn write_pg_password_tempfile(
          printf '%s:%s:%s:%s:%s\\n' '{printf_host}' '{db_port}' '{printf_db}' '{printf_user}' '{printf_pw}' > $TMPF && \
          PGPASSFILE=$TMPF "
     );
+}
+
+/// The only socket directories `PostgreSQL` accepts as a `db_host` (the Debian
+/// and the Red Hat default): a fixed list, compared as an exact string.
+const PG_SOCKET_DIRS: [&str; 2] = ["/var/run/postgresql", "/run/postgresql"];
+
+/// Longest `db_host` accepted: the length limit of a DNS name.
+const DB_HOST_MAX_LEN: usize = 253;
+
+/// Longest `db_password` accepted: the password is written as one line of an
+/// option file or password file, and the readers of those files handle long
+/// lines in pieces.
+const DB_PASSWORD_MAX_LEN: usize = 1024;
+
+/// Shell prefix of a `PostgreSQL` client that connects to another server:
+/// drops every variable through which `libpq` could still find a stored
+/// password (`PGPASSWORD`, a connection service file) or a different server
+/// address (`PGHOSTADDR`). `unset` is a POSIX builtin; the command runs in the
+/// SSH user's shell (`$SHELL -c`), so nothing outlives it. It is joined with
+/// `&&`, not `;`: `unset` of a `readonly` variable fails, and the client must
+/// not start then (a surviving `PGPASSWORD` would beat the `PGPASSFILE`).
+/// `unset` of a variable that is not set succeeds.
+const PG_REMOTE_UNSET: &str =
+    "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && ";
+
+/// Option of every `PostgreSQL` client (`psql`, `pg_dump`), local or not: never
+/// ask for a password. A prompt cannot work in a non-interactive command, and
+/// with no terminal `psql` reads the answer from standard input, which for a
+/// restore is the caller's input file. A call that needs a password and has
+/// none fails instead.
+const PG_NO_PROMPT: &str = "-w ";
+
+/// Environment of a `PostgreSQL` client that connects to another server: the
+/// client certificate file named does not exist, so `libpq` goes on without a
+/// client certificate and the one stored on the host
+/// (`~/.postgresql/postgresql.crt` or an ambient `PGSSLCERT`) is not presented
+/// to the server.
+const PG_REMOTE_SSLCERT: &str = "PGSSLCERT=/nonexistent ";
+
+/// Shell prefix of a `MySQL` client that connects to another server: drops the
+/// password environment variable (joined with `&&`, see [`PG_REMOTE_UNSET`]).
+const MYSQL_REMOTE_UNSET: &str = "unset MYSQL_PWD && ";
+
+/// Environment of a `MySQL` client that connects to another server: `HOME`
+/// hides `~/.my.cnf` and `~/.mylogin.cnf`, and `MYSQL_TEST_LOGIN_FILE` hides
+/// the login-path file on `MySQL`. With `--defaults-file` (see
+/// [`write_mysql_client`]) the client reads no other option file than the one
+/// the tool writes, so the settings of `/etc` (TLS included) do not apply to
+/// such a call.
+const MYSQL_REMOTE_ENV: &str = "HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null ";
+
+/// Whether `host` designates the database server of the SSH host itself, the
+/// only one the host's stored database credentials may be used for.
+///
+/// Local: exactly `localhost` (any case), an IP address (no brackets, no
+/// port) that is a loopback address (`127.0.0.0/8`, `::1`, and `::ffff:127.x`
+/// mapped to `IPv4`), and, for `PostgreSQL` only, one of the two fixed socket
+/// directories [`PG_SOCKET_DIRS`]. Everything else is another server: other
+/// names (a `DNS` name can point anywhere), short forms such as `127.1`,
+/// `0.0.0.0`, `[::1]` and any other path.
+fn is_local_db_host(db_type: &DatabaseType, host: &str) -> bool {
+    is_loopback_host(host)
+        || (matches!(db_type, DatabaseType::PostgreSQL) && PG_SOCKET_DIRS.contains(&host))
+}
+
+/// Write what a `PostgreSQL` client needs before its own command: for another
+/// server, the `unset` prefix, then the `pgpass` tempfile (the caller's
+/// password, or an empty one when there is none, so that no stored source can
+/// apply) and [`PG_REMOTE_SSLCERT`]; for a local server, the `pgpass` tempfile
+/// when there is a password and nothing otherwise.
+fn write_pg_prelude(
+    cmd: &mut String,
+    local: bool,
+    db_host: &str,
+    db_port: u16,
+    database: &str,
+    db_user: &str,
+    password: Option<&str>,
+) {
+    if !local {
+        cmd.push_str(PG_REMOTE_UNSET);
+    }
+    match password {
+        Some(pw) => write_pg_password_tempfile(cmd, db_host, db_port, database, db_user, pw),
+        None if !local => cmd.push_str(
+            "TMPF=$(mktemp) && \
+             trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && \
+             chmod 600 \"$TMPF\" && \
+             PGPASSFILE=$TMPF ",
+        ),
+        None => {}
+    }
+    if !local {
+        cmd.push_str(PG_REMOTE_SSLCERT);
+    }
+}
+
+/// Write what a `MySQL` client needs before its own arguments, and the client
+/// binary with its option-file argument (which must be the first argument).
+///
+/// Local server: the tempfile and `--defaults-extra-file=$TMPF` when there is
+/// a password, the bare binary otherwise. Another server: the `unset` prefix,
+/// the tempfile when there is a password, the environment of
+/// [`MYSQL_REMOTE_ENV`], then the binary with `--defaults-file=$TMPF` (the
+/// client reads that file only: no `/etc` option file, no `MYSQL_HOME` or
+/// `MARIADB_HOME` one, so no other password setting of the host applies), or
+/// with `--no-defaults` when there is no password (no option file at all).
+fn write_mysql_client(cmd: &mut String, local: bool, password: Option<&str>, binary: &str) {
+    if !local {
+        cmd.push_str(MYSQL_REMOTE_UNSET);
+    }
+    if let Some(pw) = password {
+        write_mysql_password_tempfile(cmd, pw);
+    }
+    if !local {
+        cmd.push_str(MYSQL_REMOTE_ENV);
+    }
+    cmd.push_str(binary);
+    match (password.is_some(), local) {
+        (true, true) => cmd.push_str(" --defaults-extra-file=$TMPF"),
+        (true, false) => cmd.push_str(" --defaults-file=$TMPF"),
+        (false, false) => cmd.push_str(" --no-defaults"),
+        (false, true) => {}
+    }
 }
 
 /// Helper to write the compression suffix or plain redirect.
@@ -246,7 +381,8 @@ impl DatabaseCommandBuilder {
     /// **FIND-031 (Sprint 2 Task 21):** when a password is supplied, it is
     /// written to a 0600 tempfile (cleaned up by `trap ... EXIT`) and the
     /// DB CLI reads it from there:
-    /// - `MySQL`: `--defaults-extra-file=$TMPF` (must be the *first* mysql arg).
+    /// - `MySQL`: `--defaults-extra-file=$TMPF` for the local server (must be
+    ///   the *first* mysql arg).
     /// - `PostgreSQL`: `PGPASSFILE=$TMPF` env var with a `~/.pgpass`-format file.
     ///
     /// The previous shape used `MYSQL_PWD=...` / `PGPASSWORD=...` env vars,
@@ -260,12 +396,38 @@ impl DatabaseCommandBuilder {
     /// cannot make the client run a shell or touch a file whatever
     /// [`Self::validate_client_query`] missed. Only `\C` and `delimiter` stay.
     ///
-    /// Resulting shape (`MySQL` with password):
+    /// Resulting shape (`MySQL` with password, local server):
     /// ```text
     /// TMPF=$(mktemp) && trap '...' EXIT && chmod 600 "$TMPF" && \
     /// printf '[client]\npassword=%s\n' '<pw>' > $TMPF && \
     /// mysql --defaults-extra-file=$TMPF -h host -P 3306 -u user db --binary-mode -e 'query'
     /// ```
+    ///
+    /// `PostgreSQL` clients always run with `-w` (never prompt for a password),
+    /// local calls included: a call that needs a password and has none fails.
+    /// For a socket directory (one of the two fixed ones) the `pgpass` host
+    /// field is `*`: `libpq` matches its compile-time default directory as
+    /// `localhost` and any other one literally, and the file holds only this
+    /// line.
+    ///
+    /// **Another server than the local one** (`db_host` that is not
+    /// `localhost`, a loopback address or, for `PostgreSQL`, a fixed socket
+    /// directory): a password or a `PostgreSQL` client certificate stored on the
+    /// host must not be presented to it. The command starts with an `unset` of
+    /// the password variables (`MYSQL_PWD`; `PGPASSWORD`, `PGSERVICE`,
+    /// `PGSERVICEFILE`, `PGSYSCONFDIR`, `PGHOSTADDR`) and only the caller's
+    /// password applies. `PostgreSQL` always gets a `PGPASSFILE` tempfile (empty
+    /// without a password) and `PGSSLCERT=/nonexistent` (no client certificate
+    /// is presented). `MySQL` runs with `HOME=/nonexistent
+    /// MYSQL_TEST_LOGIN_FILE=/dev/null` and reads no option file but the one
+    /// built from the call (`--defaults-file=$TMPF`, or `--no-defaults` without
+    /// a password), so `~/.my.cnf`, `~/.mylogin.cnf`, the `/etc` files and
+    /// `MYSQL_HOME` ones, TLS settings included, do not apply; `mysql` also
+    /// runs with `--local-infile=0`.
+    /// [`Self::validate_connection`] refuses that case without a password; the
+    /// fail-closed shape is for library callers that skip it. Library callers
+    /// must also run [`Self::validate_connection`] for its limit on the length
+    /// of `db_password`: the builder cannot fail on an over-long password.
     #[must_use]
     #[expect(clippy::too_many_arguments)]
     pub fn build_query_command(
@@ -282,38 +444,41 @@ impl DatabaseCommandBuilder {
         let escaped_host = shell_escape(db_host);
         let escaped_user = shell_escape(db_user);
         let escaped_db = shell_escape(database);
+        let local = is_local_db_host(db_type, db_host);
         let mut cmd = String::new();
 
         match db_type {
             DatabaseType::MySQL => {
-                if let Some(password) = db_password {
-                    write_mysql_password_tempfile(&mut cmd, password);
-                    // --defaults-extra-file must be the FIRST mysql argument.
-                    let _ = write!(
-                        cmd,
-                        "mysql --defaults-extra-file=$TMPF -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode -e '{escaped_query}'"
-                    );
-                } else {
-                    let _ = write!(
-                        cmd,
-                        "mysql -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode -e '{escaped_query}'"
-                    );
+                // The option-file argument (--defaults-extra-file, --defaults-file or
+                // --no-defaults) is the FIRST mysql argument.
+                write_mysql_client(&mut cmd, local, db_password, "mysql");
+                let _ = write!(
+                    cmd,
+                    " -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode"
+                );
+                if !local {
+                    cmd.push_str(" --local-infile=0");
                 }
+                let _ = write!(cmd, " -e '{escaped_query}'");
 
                 if let Some("csv") = format {
                     cmd.push_str(" -B");
                 }
             }
             DatabaseType::PostgreSQL => {
-                if let Some(password) = db_password {
-                    write_pg_password_tempfile(
-                        &mut cmd, db_host, db_port, database, db_user, password,
-                    );
-                }
+                write_pg_prelude(
+                    &mut cmd,
+                    local,
+                    db_host,
+                    db_port,
+                    database,
+                    db_user,
+                    db_password,
+                );
 
                 let _ = write!(
                     cmd,
-                    "psql -h {escaped_host} -p {db_port} -U {escaped_user} -d {escaped_db} -c '{escaped_query}'"
+                    "psql {PG_NO_PROMPT}-h {escaped_host} -p {db_port} -U {escaped_user} -d {escaped_db} -c '{escaped_query}'"
                 );
 
                 if let Some("csv") = format {
@@ -330,8 +495,20 @@ impl DatabaseCommandBuilder {
     /// **FIND-031:** uses the same tempfile pattern as
     /// [`Self::build_query_command`] to keep passwords out of argv/environ.
     ///
-    /// - `MySQL`: `mysqldump --defaults-extra-file=$TMPF -h host ...`.
-    /// - `PostgreSQL`: `PGPASSFILE=$TMPF pg_dump -h host ...`.
+    /// - `MySQL`, local server: `mysqldump --defaults-extra-file=$TMPF -h host ...`.
+    /// - `PostgreSQL`: `PGPASSFILE=$TMPF pg_dump -w -h host ...`.
+    ///
+    /// A `db_host` that is not the local server gets the shape described on
+    /// [`Self::build_query_command`]: the `unset` prefix, `PGSSLCERT`, and for
+    /// `MySQL` `HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null` with
+    /// `--defaults-file=$TMPF` (or `--no-defaults` without a password).
+    /// `pg_dump` always runs with `-w`.
+    ///
+    /// **Residual:** `mysqldump` rejects `--local-infile`, so unlike `mysql` it
+    /// cannot be told to refuse a `LOCAL INFILE` request. A client library built
+    /// with that feature on could be asked by a server of the caller's choosing
+    /// for a file the SSH user can read. The `mysqldump` of the images checked
+    /// (`MySQL` 8.4, `MariaDB` 10.11) declines such a request.
     #[must_use]
     #[expect(clippy::too_many_arguments)]
     pub fn build_dump_command(
@@ -348,22 +525,17 @@ impl DatabaseCommandBuilder {
         let escaped_host = shell_escape(db_host);
         let escaped_user = shell_escape(db_user);
         let escaped_db = shell_escape(database);
+        let local = is_local_db_host(db_type, db_host);
         let mut cmd = String::new();
 
         match db_type {
             DatabaseType::MySQL => {
-                if let Some(password) = db_password {
-                    write_mysql_password_tempfile(&mut cmd, password);
-                    let _ = write!(
-                        cmd,
-                        "mysqldump --defaults-extra-file=$TMPF -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db}"
-                    );
-                } else {
-                    let _ = write!(
-                        cmd,
-                        "mysqldump -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db}"
-                    );
-                }
+                // No `--local-infile=0`: `mysqldump` refuses that option.
+                write_mysql_client(&mut cmd, local, db_password, "mysqldump");
+                let _ = write!(
+                    cmd,
+                    " -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db}"
+                );
 
                 if let Some(table_list) = tables {
                     for table in table_list {
@@ -372,15 +544,19 @@ impl DatabaseCommandBuilder {
                 }
             }
             DatabaseType::PostgreSQL => {
-                if let Some(password) = db_password {
-                    write_pg_password_tempfile(
-                        &mut cmd, db_host, db_port, database, db_user, password,
-                    );
-                }
+                write_pg_prelude(
+                    &mut cmd,
+                    local,
+                    db_host,
+                    db_port,
+                    database,
+                    db_user,
+                    db_password,
+                );
 
                 let _ = write!(
                     cmd,
-                    "pg_dump -h {escaped_host} -p {db_port} -U {escaped_user} {escaped_db}"
+                    "pg_dump {PG_NO_PROMPT}-h {escaped_host} -p {db_port} -U {escaped_user} {escaped_db}"
                 );
 
                 if let Some(table_list) = tables {
@@ -401,14 +577,22 @@ impl DatabaseCommandBuilder {
     /// **FIND-031:** uses the same tempfile pattern as
     /// [`Self::build_query_command`] to keep passwords out of argv/environ.
     ///
-    /// - `MySQL`: `mysql --defaults-extra-file=$TMPF ... --binary-mode < input_file`.
+    /// - `MySQL`, local server: `mysql --defaults-extra-file=$TMPF ... --binary-mode < input_file`.
     ///   `--binary-mode` switches the client's own commands (`\!`, `system`,
     ///   `source`, ...) off, so a `\! cmd` line in the file is not run in a
     ///   shell; `mysqldump` output does not depend on them.
-    /// - `PostgreSQL`: `PGPASSFILE=$TMPF psql ... < input_file`. `psql` has no
+    /// - `PostgreSQL`: `PGPASSFILE=$TMPF psql -w ... < input_file`. `psql` has no
     ///   option that turns its backslash commands off: the file is run as a
     ///   `psql` script, and a line starting with `\` (`\!`, `\copy`) acts on
     ///   the remote host.
+    ///
+    ///   The input file is therefore a client script: its backslash commands
+    ///   act on the host and can open another connection, and its statements
+    ///   go to the server named by `db_host`.
+    ///
+    /// A `db_host` that is not the local server gets the shape described on
+    /// [`Self::build_query_command`] (`PGSSLCERT`, `mysql --defaults-file`
+    /// and `--local-infile=0`, ...). `psql` always runs with `-w`.
     #[must_use]
     pub fn build_restore_command(
         db_type: &DatabaseType,
@@ -423,33 +607,35 @@ impl DatabaseCommandBuilder {
         let escaped_user = shell_escape(db_user);
         let escaped_db = shell_escape(database);
         let escaped_file = shell_escape(input_file);
+        let local = is_local_db_host(db_type, db_host);
         let mut cmd = String::new();
 
         match db_type {
             DatabaseType::MySQL => {
-                if let Some(password) = db_password {
-                    write_mysql_password_tempfile(&mut cmd, password);
-                    let _ = write!(
-                        cmd,
-                        "mysql --defaults-extra-file=$TMPF -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode < {escaped_file}"
-                    );
-                } else {
-                    let _ = write!(
-                        cmd,
-                        "mysql -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode < {escaped_file}"
-                    );
+                write_mysql_client(&mut cmd, local, db_password, "mysql");
+                let _ = write!(
+                    cmd,
+                    " -h {escaped_host} -P {db_port} -u {escaped_user} {escaped_db} --binary-mode"
+                );
+                if !local {
+                    cmd.push_str(" --local-infile=0");
                 }
+                let _ = write!(cmd, " < {escaped_file}");
             }
             DatabaseType::PostgreSQL => {
-                if let Some(password) = db_password {
-                    write_pg_password_tempfile(
-                        &mut cmd, db_host, db_port, database, db_user, password,
-                    );
-                }
+                write_pg_prelude(
+                    &mut cmd,
+                    local,
+                    db_host,
+                    db_port,
+                    database,
+                    db_user,
+                    db_password,
+                );
 
                 let _ = write!(
                     cmd,
-                    "psql -h {escaped_host} -p {db_port} -U {escaped_user} -d {escaped_db} < {escaped_file}"
+                    "psql {PG_NO_PROMPT}-h {escaped_host} -p {db_port} -U {escaped_user} -d {escaped_db} < {escaped_file}"
                 );
             }
         }
@@ -579,6 +765,17 @@ impl DatabaseCommandBuilder {
     /// A `PostgreSQL` `database` must not be a connection string (see
     /// [`Self::validate_postgres_database`]).
     ///
+    /// `db_host` must not be empty and holds one host name or address:
+    /// ASCII letters, digits and `. - _ : %` only, at most 253 bytes (or, for
+    /// `PostgreSQL`, one of the two fixed socket directories). A server other
+    /// than the local one (anything but `localhost`, a loopback IP address
+    /// and, for `PostgreSQL`, the two fixed socket directories) needs a
+    /// non-empty `db_password`: without one the database client would fall
+    /// back to the credentials stored on the SSH host. For `PostgreSQL` the
+    /// `db_user` and the `database` of such a server must not be empty either
+    /// (the password file line would not match the defaulted values).
+    /// `db_password` holds at most 1024 bytes.
+    ///
     /// # Errors
     ///
     /// Returns `BridgeError::CommandDenied` naming the offending argument.
@@ -602,9 +799,31 @@ impl DatabaseCommandBuilder {
         }
         if let Some(pw) = db_password {
             refuse_line_break("db_password", pw)?;
+            if pw.len() > DB_PASSWORD_MAX_LEN {
+                return Err(BridgeError::CommandDenied {
+                    reason: format!(
+                        "'db_password' must be at most {DB_PASSWORD_MAX_LEN} bytes long"
+                    ),
+                });
+            }
+        }
+        if let Some(host) = db_host {
+            validate_db_host(db_type, host, db_password)?;
         }
         if matches!(db_type, DatabaseType::PostgreSQL) {
             Self::validate_postgres_database(database)?;
+            let remote = db_host.is_some_and(|host| !is_local_db_host(db_type, host));
+            if remote {
+                for (arg, value) in [("db_user", db_user), ("database", Some(database))] {
+                    if value.is_some_and(str::is_empty) {
+                        return Err(BridgeError::CommandDenied {
+                            reason: format!(
+                                "'{arg}' must not be empty when 'db_host' names another server"
+                            ),
+                        });
+                    }
+                }
+            }
         }
         if matches!(db_type, DatabaseType::MySQL) {
             for table in tables.unwrap_or_default() {
@@ -613,6 +832,45 @@ impl DatabaseCommandBuilder {
         }
         Ok(())
     }
+}
+
+/// Check a `db_host`: not empty, one host name or address, and a password
+/// when it names a server other than the local one.
+///
+/// The charset closes every way to smuggle a second host or a connection
+/// parameter into `-h` (comma lists, `@`, `=`, quotes, spaces, non-ASCII).
+fn validate_db_host(db_type: &DatabaseType, host: &str, db_password: Option<&str>) -> Result<()> {
+    if host.is_empty() {
+        return Err(BridgeError::CommandDenied {
+            reason: "'db_host' must not be empty: omit it for the local server".to_string(),
+        });
+    }
+    let socket_dir = matches!(db_type, DatabaseType::PostgreSQL) && PG_SOCKET_DIRS.contains(&host);
+    let name_like = host.len() <= DB_HOST_MAX_LEN
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'%'));
+    if !socket_dir && !name_like {
+        let alternative = if matches!(db_type, DatabaseType::PostgreSQL) {
+            ", or /var/run/postgresql or /run/postgresql"
+        } else {
+            ""
+        };
+        return Err(BridgeError::CommandDenied {
+            reason: format!(
+                "'db_host' must be one host name or IP address: ASCII letters, digits and \
+                 . - _ : % only, at most {DB_HOST_MAX_LEN} bytes{alternative}"
+            ),
+        });
+    }
+    if !is_local_db_host(db_type, host) && db_password.is_none_or(str::is_empty) {
+        return Err(BridgeError::CommandDenied {
+            reason: "'db_host' names another server: give 'db_password' (the host's stored \
+                     database credentials are only used for a local server)"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Refuse a value holding a newline, carriage return or NUL.
@@ -903,10 +1161,12 @@ mod tests {
             Some("csv"),
         );
         // FIND-031: password lives in a 0600 tempfile, mysql reads it via
-        // --defaults-extra-file. No env var prefix anymore.
-        assert!(cmd.starts_with("TMPF=$(mktemp)"));
+        // --defaults-file (another server). No env var prefix anymore.
+        // `dbhost` is another server: the `unset` prefix comes first.
+        assert!(cmd.starts_with("unset MYSQL_PWD && TMPF=$(mktemp)"));
         assert!(cmd.contains("printf '[client]\\npassword=%s\\n' 'secret'"));
-        assert!(cmd.contains("mysql --defaults-extra-file=$TMPF"));
+        assert!(cmd.contains("mysql --defaults-file=$TMPF"));
+        assert!(!cmd.contains("--defaults-extra-file"));
         assert!(cmd.contains("-h 'dbhost' -P 3306 -u 'admin' 'mydb'"));
         assert!(cmd.contains("-e 'SELECT * FROM users'"));
         assert!(cmd.contains("-B"));
@@ -976,13 +1236,16 @@ mod tests {
         );
         // FIND-031: password lives in a 0600 ~/.pgpass-format tempfile;
         // PGPASSFILE env var points psql at it. No PGPASSWORD anymore.
-        assert!(cmd.starts_with("TMPF=$(mktemp)"));
+        // `pghost` is another server: the `unset` prefix comes first.
+        assert!(cmd.starts_with(
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp)"
+        ));
         assert!(cmd.contains("PGPASSFILE=$TMPF"));
         // pgpass format: host:port:database:user:password
         assert!(
             cmd.contains("printf '%s:%s:%s:%s:%s\\n' 'pghost' '5432' 'pgdb' 'pguser' 'pgpass'")
         );
-        assert!(cmd.contains("psql -h 'pghost' -p 5432 -U 'pguser' -d 'pgdb'"));
+        assert!(cmd.contains("psql -w -h 'pghost' -p 5432 -U 'pguser' -d 'pgdb'"));
         assert!(cmd.contains("-c 'SELECT * FROM orders'"));
         assert!(cmd.contains("--csv"));
     }
@@ -1000,7 +1263,7 @@ mod tests {
             None,
         );
         assert!(!cmd.contains("PGPASSWORD"));
-        assert!(cmd.starts_with("psql -h 'localhost'"));
+        assert!(cmd.starts_with("psql -w -h 'localhost'"));
     }
 
     #[test]
@@ -1157,7 +1420,7 @@ mod tests {
         // FIND-031: PGPASSFILE pgpass-file pattern, no PGPASSWORD env.
         assert!(cmd.contains("PGPASSFILE=$TMPF"));
         assert!(cmd.contains("printf '%s:%s:%s:%s:%s\\n'"));
-        assert!(cmd.contains("pg_dump -h 'localhost' -p 5432 -U 'postgres' 'mydb'"));
+        assert!(cmd.contains("pg_dump -w -h 'localhost' -p 5432 -U 'postgres' 'mydb'"));
         assert!(cmd.contains("> '/tmp/dump.sql'"));
     }
 
@@ -1246,7 +1509,9 @@ mod tests {
         assert!(cmd.contains("PGPASSFILE=$TMPF"));
         assert!(cmd.contains("printf '%s:%s:%s:%s:%s\\n'"));
         assert!(
-            cmd.contains("psql -h 'localhost' -p 5432 -U 'postgres' -d 'mydb' < '/tmp/dump.sql'")
+            cmd.contains(
+                "psql -w -h 'localhost' -p 5432 -U 'postgres' -d 'mydb' < '/tmp/dump.sql'"
+            )
         );
     }
 
@@ -1480,11 +1745,11 @@ mod tests {
         );
         assert!(
             !cmd.contains("MYSQL_PWD="),
-            "FIND-031: MYSQL_PWD env var must be replaced by --defaults-extra-file: {cmd}"
+            "FIND-031: MYSQL_PWD env var must be replaced by --defaults-file: {cmd}"
         );
         assert!(
-            cmd.contains("--defaults-extra-file"),
-            "FIND-031: must use --defaults-extra-file: {cmd}"
+            cmd.contains("--defaults-file=$TMPF"),
+            "FIND-031: must use --defaults-file: {cmd}"
         );
     }
 
@@ -1536,7 +1801,7 @@ mod tests {
         let argv = post_redirect(&cmd);
         assert!(!argv.contains("topsecret"), "argv: {argv}");
         assert!(!cmd.contains("MYSQL_PWD="));
-        assert!(cmd.contains("--defaults-extra-file"));
+        assert!(cmd.contains("--defaults-file=$TMPF"));
     }
 
     /// FIND-031: same protection on `pg_dump`.
@@ -1576,7 +1841,7 @@ mod tests {
         let argv = post_redirect(&cmd);
         assert!(!argv.contains("topsecret"), "argv: {argv}");
         assert!(!cmd.contains("MYSQL_PWD="));
-        assert!(cmd.contains("--defaults-extra-file"));
+        assert!(cmd.contains("--defaults-file=$TMPF"));
     }
 
     /// FIND-031: same protection on `psql < dump.sql` restore path.
@@ -2034,5 +2299,1098 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // ============== Stored credentials stay on the local server ==============
+
+    /// `validate_connection` for `db_host` and `db_password` alone.
+    fn check_host(
+        db_type: &DatabaseType,
+        host: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<()> {
+        DatabaseCommandBuilder::validate_connection(db_type, host, None, "db", password, None)
+    }
+
+    fn denied_naming_both(result: Result<()>) {
+        match result {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(reason.contains("'db_host'"), "{reason}");
+                assert!(reason.contains("'db_password'"), "{reason}");
+            }
+            other => panic!("expected CommandDenied naming both, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_is_local_db_host_classification() {
+        let my = DatabaseType::MySQL;
+        let pg = DatabaseType::PostgreSQL;
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "LocalHost",
+            "127.0.0.1",
+            "127.0.0.2",
+            "127.255.255.254",
+            "::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(is_local_db_host(&my, host), "{host}");
+            assert!(is_local_db_host(&pg, host), "{host}");
+        }
+        for dir in ["/var/run/postgresql", "/run/postgresql"] {
+            assert!(is_local_db_host(&pg, dir), "{dir}");
+            assert!(!is_local_db_host(&my, dir), "{dir}");
+        }
+        for host in [
+            "db.example.com",
+            "localhost.example.com",
+            "localhost.",
+            "10.0.0.5",
+            "127.1",
+            "0.0.0.0",
+            "[::1]",
+            "::2",
+            "::ffff:10.0.0.5",
+            "::1%lo",
+            "/tmp/x",
+            "/var/run/postgresql/",
+            "/var/run/postgresql/.s.PGSQL.5432",
+            "",
+        ] {
+            assert!(!is_local_db_host(&my, host), "{host}");
+            assert!(!is_local_db_host(&pg, host), "{host}");
+        }
+    }
+
+    #[test]
+    fn test_validate_connection_local_host_needs_no_password() {
+        for db in [DatabaseType::MySQL, DatabaseType::PostgreSQL] {
+            for host in [
+                None,
+                Some("localhost"),
+                Some("LOCALHOST"),
+                Some("127.0.0.1"),
+                Some("127.0.0.2"),
+                Some("::1"),
+                Some("::ffff:127.0.0.1"),
+            ] {
+                assert!(check_host(&db, host, None).is_ok(), "{db:?} {host:?}");
+                assert!(check_host(&db, host, Some("")).is_ok(), "{db:?} {host:?}");
+                assert!(check_host(&db, host, Some("pw")).is_ok(), "{db:?} {host:?}");
+            }
+        }
+        for dir in ["/var/run/postgresql", "/run/postgresql"] {
+            let pg = DatabaseType::PostgreSQL;
+            assert!(check_host(&pg, Some(dir), None).is_ok(), "{dir}");
+            assert!(check_host(&pg, Some(dir), Some("pw")).is_ok(), "{dir}");
+        }
+    }
+
+    #[test]
+    fn test_validate_connection_other_server_needs_a_password() {
+        for db in [DatabaseType::MySQL, DatabaseType::PostgreSQL] {
+            for host in [
+                "db.example.com",
+                "10.0.0.5",
+                "127.1",
+                "0.0.0.0",
+                "::2",
+                "localhost.example.com",
+                "fe80::1%eth0",
+            ] {
+                denied_naming_both(check_host(&db, Some(host), None));
+                denied_naming_both(check_host(&db, Some(host), Some("")));
+                assert!(
+                    check_host(&db, Some(host), Some("pw")).is_ok(),
+                    "{db:?} {host}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_connection_refuses_odd_db_hosts_always() {
+        let long = "a".repeat(254);
+        let hosts = [
+            "",
+            "localhost,evil",
+            "a@b",
+            "host=x",
+            "a b",
+            "\u{e9}vil",
+            "'x'",
+            "a;b",
+            "a/b",
+            "[::1]",
+            "evil:5432/db",
+            long.as_str(),
+            "/tmp/x",
+            "/var/run/postgresql/",
+        ];
+        for db in [DatabaseType::MySQL, DatabaseType::PostgreSQL] {
+            for host in hosts {
+                for password in [None, Some("pw")] {
+                    denied_naming(check_host(&db, Some(host), password), "db_host");
+                }
+            }
+        }
+        // The socket directories are a PostgreSQL notion only.
+        denied_naming(
+            check_host(
+                &DatabaseType::MySQL,
+                Some("/var/run/postgresql"),
+                Some("pw"),
+            ),
+            "db_host",
+        );
+        // The longest DNS name is fine.
+        let longest = "a".repeat(253);
+        assert!(check_host(&DatabaseType::MySQL, Some(&longest), Some("pw")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_connection_postgres_charset_message_names_socket_dirs() {
+        let pg = check_host(&DatabaseType::PostgreSQL, Some("/tmp/x"), Some("pw"));
+        match pg {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(reason.contains("/var/run/postgresql"), "{reason}");
+                assert!(reason.contains("/run/postgresql"), "{reason}");
+            }
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+        match check_host(&DatabaseType::MySQL, Some("/tmp/x"), Some("pw")) {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(!reason.contains("postgresql"), "{reason}");
+            }
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_connection_caps_the_password_length() {
+        let longest = "p".repeat(1024);
+        let too_long = "p".repeat(1025);
+        let huge = "p".repeat(5000);
+        for db in [DatabaseType::MySQL, DatabaseType::PostgreSQL] {
+            for host in [None, Some("db.example.com")] {
+                assert!(
+                    check_host(&db, host, Some(longest.as_str())).is_ok(),
+                    "{db:?}"
+                );
+                for pw in [too_long.as_str(), huge.as_str()] {
+                    denied_naming(check_host(&db, host, Some(pw)), "db_password");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_connection_postgres_other_server_needs_user_and_database() {
+        let pg = DatabaseType::PostgreSQL;
+        let check = |host: Option<&str>, user: Option<&str>, database: &str| {
+            DatabaseCommandBuilder::validate_connection(&pg, host, user, database, Some("pw"), None)
+        };
+        denied_naming(check(Some("db.example.com"), Some(""), "db"), "db_user");
+        denied_naming(check(Some("db.example.com"), None, ""), "database");
+        assert!(check(Some("db.example.com"), None, "db").is_ok());
+        assert!(check(Some("db.example.com"), Some("app"), "db").is_ok());
+        // The local server keeps today's behaviour.
+        assert!(check(None, Some(""), "").is_ok());
+        assert!(check(Some("localhost"), Some(""), "").is_ok());
+        // MySQL does not use a password file line, so it is not concerned.
+        assert!(
+            DatabaseCommandBuilder::validate_connection(
+                &DatabaseType::MySQL,
+                Some("db.example.com"),
+                Some(""),
+                "",
+                Some("pw"),
+                None,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_connection_empty_db_host_message() {
+        match check_host(&DatabaseType::MySQL, Some(""), Some("pw")) {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(reason.contains("must not be empty"), "{reason}");
+                assert!(reason.contains("omit it"), "{reason}");
+            }
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_remote_commands_carry_the_unset_prefix_and_local_ones_do_not() {
+        let pg_unset = "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && ";
+        for password in [None, Some("pw")] {
+            let remote_pg = DatabaseCommandBuilder::build_restore_command(
+                &DatabaseType::PostgreSQL,
+                "db.example.com",
+                5432,
+                "app",
+                password,
+                "db",
+                "/tmp/i.sql",
+            );
+            assert!(remote_pg.starts_with(pg_unset), "{remote_pg}");
+            assert!(
+                remote_pg.contains("PGPASSFILE=$TMPF PGSSLCERT=/nonexistent psql -w -h"),
+                "{remote_pg}"
+            );
+            let remote_my = DatabaseCommandBuilder::build_restore_command(
+                &DatabaseType::MySQL,
+                "db.example.com",
+                3306,
+                "app",
+                password,
+                "db",
+                "/tmp/i.sql",
+            );
+            assert!(remote_my.starts_with("unset MYSQL_PWD && "), "{remote_my}");
+            assert!(remote_my.contains("HOME=/nonexistent "), "{remote_my}");
+            assert!(remote_my.contains("--local-infile=0"), "{remote_my}");
+            let local = DatabaseCommandBuilder::build_restore_command(
+                &DatabaseType::MySQL,
+                "localhost",
+                3306,
+                "app",
+                password,
+                "db",
+                "/tmp/i.sql",
+            );
+            assert!(!local.contains("unset "), "{local}");
+            assert!(!local.contains("HOME="), "{local}");
+            assert!(!local.contains("--local-infile"), "{local}");
+        }
+    }
+
+    #[test]
+    fn test_remote_mysqldump_has_no_local_infile_option() {
+        // `mysqldump` rejects the option, on the command line and in a file.
+        for password in [None, Some("pw")] {
+            let cmd = DatabaseCommandBuilder::build_dump_command(
+                &DatabaseType::MySQL,
+                "db.example.com",
+                3306,
+                "app",
+                password,
+                "db",
+                None,
+                None,
+                "/tmp/o.sql",
+            );
+            assert!(!cmd.contains("local-infile"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_remote_password_never_travels_in_an_environment_variable() {
+        for db in [DatabaseType::MySQL, DatabaseType::PostgreSQL] {
+            let cmd = DatabaseCommandBuilder::build_query_command(
+                &db,
+                "db.example.com",
+                3306,
+                "app",
+                Some("topsecret"),
+                "db",
+                "SELECT 1",
+                None,
+            );
+            assert!(!cmd.contains("MYSQL_PWD="), "{cmd}");
+            assert!(!cmd.contains("PGPASSWORD="), "{cmd}");
+            assert!(!post_redirect(&cmd).contains("topsecret"), "{cmd}");
+        }
+    }
+
+    // ============== Golden commands: another server vs the local one ==============
+    //
+    // Another server: only the caller's password applies. Local server: the
+    // exact shapes the builders emitted before the host classification.
+
+    #[test]
+    fn test_golden_remote_query_mysql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::MySQL,
+            "db.example.com",
+            3306,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "unset MYSQL_PWD && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '[client]\\npassword=%s\\n' 's3cret' > $TMPF && HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysql --defaults-file=$TMPF -h 'db.example.com' -P 3306 -u 'app' 'mydb' --binary-mode --local-infile=0 -e 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_query_mysql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::MySQL,
+            "db.example.com",
+            3306,
+            "app",
+            None,
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "unset MYSQL_PWD && HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysql --no-defaults -h 'db.example.com' -P 3306 -u 'app' 'mydb' --binary-mode --local-infile=0 -e 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_query_mysql_csv() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::MySQL,
+            "db.example.com",
+            3306,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "SELECT 1",
+            Some("csv"),
+        );
+        assert_eq!(
+            cmd,
+            "unset MYSQL_PWD && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '[client]\\npassword=%s\\n' 's3cret' > $TMPF && HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysql --defaults-file=$TMPF -h 'db.example.com' -P 3306 -u 'app' 'mydb' --binary-mode --local-infile=0 -e 'SELECT 1' -B"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_query_postgresql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "db.example.com",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' 'db.example.com' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF PGSSLCERT=/nonexistent psql -w -h 'db.example.com' -p 5432 -U 'app' -d 'mydb' -c 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_query_postgresql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "db.example.com",
+            5432,
+            "app",
+            None,
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && PGPASSFILE=$TMPF PGSSLCERT=/nonexistent psql -w -h 'db.example.com' -p 5432 -U 'app' -d 'mydb' -c 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_dump_mysql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::MySQL,
+            "db.example.com",
+            3306,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            None,
+            None,
+            "/tmp/o.sql",
+        );
+        assert_eq!(
+            cmd,
+            "unset MYSQL_PWD && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '[client]\\npassword=%s\\n' 's3cret' > $TMPF && HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysqldump --defaults-file=$TMPF -h 'db.example.com' -P 3306 -u 'app' 'mydb' > '/tmp/o.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_dump_mysql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::MySQL,
+            "db.example.com",
+            3306,
+            "app",
+            None,
+            "mydb",
+            None,
+            None,
+            "/tmp/o.sql",
+        );
+        assert_eq!(
+            cmd,
+            "unset MYSQL_PWD && HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysqldump --no-defaults -h 'db.example.com' -P 3306 -u 'app' 'mydb' > '/tmp/o.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_dump_mysql_tables_gzip() {
+        let tables = vec!["users".to_string()];
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::MySQL,
+            "db.example.com",
+            3306,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            Some(&tables),
+            Some("gzip"),
+            "/tmp/o.sql.gz",
+        );
+        assert_eq!(
+            cmd,
+            "unset MYSQL_PWD && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '[client]\\npassword=%s\\n' 's3cret' > $TMPF && HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysqldump --defaults-file=$TMPF -h 'db.example.com' -P 3306 -u 'app' 'mydb' 'users' | gzip > '/tmp/o.sql.gz'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_dump_postgresql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::PostgreSQL,
+            "db.example.com",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            None,
+            None,
+            "/tmp/o.sql",
+        );
+        assert_eq!(
+            cmd,
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' 'db.example.com' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF PGSSLCERT=/nonexistent pg_dump -w -h 'db.example.com' -p 5432 -U 'app' 'mydb' > '/tmp/o.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_dump_postgresql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::PostgreSQL,
+            "db.example.com",
+            5432,
+            "app",
+            None,
+            "mydb",
+            None,
+            None,
+            "/tmp/o.sql",
+        );
+        assert_eq!(
+            cmd,
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && PGPASSFILE=$TMPF PGSSLCERT=/nonexistent pg_dump -w -h 'db.example.com' -p 5432 -U 'app' 'mydb' > '/tmp/o.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_dump_postgresql_tables_xz() {
+        let tables = vec!["users".to_string()];
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::PostgreSQL,
+            "db.example.com",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            Some(&tables),
+            Some("xz"),
+            "/tmp/o.sql.xz",
+        );
+        assert_eq!(
+            cmd,
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' 'db.example.com' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF PGSSLCERT=/nonexistent pg_dump -w -h 'db.example.com' -p 5432 -U 'app' 'mydb' -t 'users' | xz > '/tmp/o.sql.xz'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_restore_mysql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_restore_command(
+            &DatabaseType::MySQL,
+            "db.example.com",
+            3306,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "/tmp/i.sql",
+        );
+        assert_eq!(
+            cmd,
+            "unset MYSQL_PWD && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '[client]\\npassword=%s\\n' 's3cret' > $TMPF && HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysql --defaults-file=$TMPF -h 'db.example.com' -P 3306 -u 'app' 'mydb' --binary-mode --local-infile=0 < '/tmp/i.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_restore_mysql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_restore_command(
+            &DatabaseType::MySQL,
+            "db.example.com",
+            3306,
+            "app",
+            None,
+            "mydb",
+            "/tmp/i.sql",
+        );
+        assert_eq!(
+            cmd,
+            "unset MYSQL_PWD && HOME=/nonexistent MYSQL_TEST_LOGIN_FILE=/dev/null mysql --no-defaults -h 'db.example.com' -P 3306 -u 'app' 'mydb' --binary-mode --local-infile=0 < '/tmp/i.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_restore_postgresql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_restore_command(
+            &DatabaseType::PostgreSQL,
+            "db.example.com",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "/tmp/i.sql",
+        );
+        assert_eq!(
+            cmd,
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' 'db.example.com' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF PGSSLCERT=/nonexistent psql -w -h 'db.example.com' -p 5432 -U 'app' -d 'mydb' < '/tmp/i.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_restore_postgresql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_restore_command(
+            &DatabaseType::PostgreSQL,
+            "db.example.com",
+            5432,
+            "app",
+            None,
+            "mydb",
+            "/tmp/i.sql",
+        );
+        assert_eq!(
+            cmd,
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && PGPASSFILE=$TMPF PGSSLCERT=/nonexistent psql -w -h 'db.example.com' -p 5432 -U 'app' -d 'mydb' < '/tmp/i.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_query_mysql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::MySQL,
+            "localhost",
+            3306,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '[client]\\npassword=%s\\n' 's3cret' > $TMPF && mysql --defaults-extra-file=$TMPF -h 'localhost' -P 3306 -u 'app' 'mydb' --binary-mode -e 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_query_mysql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::MySQL,
+            "localhost",
+            3306,
+            "app",
+            None,
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "mysql -h 'localhost' -P 3306 -u 'app' 'mydb' --binary-mode -e 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_query_postgresql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "localhost",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' 'localhost' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF psql -w -h 'localhost' -p 5432 -U 'app' -d 'mydb' -c 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_query_postgresql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "localhost",
+            5432,
+            "app",
+            None,
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "psql -w -h 'localhost' -p 5432 -U 'app' -d 'mydb' -c 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_dump_mysql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::MySQL,
+            "localhost",
+            3306,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            None,
+            None,
+            "/tmp/o.sql",
+        );
+        assert_eq!(
+            cmd,
+            "TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '[client]\\npassword=%s\\n' 's3cret' > $TMPF && mysqldump --defaults-extra-file=$TMPF -h 'localhost' -P 3306 -u 'app' 'mydb' > '/tmp/o.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_dump_mysql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::MySQL,
+            "localhost",
+            3306,
+            "app",
+            None,
+            "mydb",
+            None,
+            None,
+            "/tmp/o.sql",
+        );
+        assert_eq!(
+            cmd,
+            "mysqldump -h 'localhost' -P 3306 -u 'app' 'mydb' > '/tmp/o.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_dump_postgresql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::PostgreSQL,
+            "localhost",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            None,
+            None,
+            "/tmp/o.sql",
+        );
+        assert_eq!(
+            cmd,
+            "TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' 'localhost' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF pg_dump -w -h 'localhost' -p 5432 -U 'app' 'mydb' > '/tmp/o.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_dump_postgresql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_dump_command(
+            &DatabaseType::PostgreSQL,
+            "localhost",
+            5432,
+            "app",
+            None,
+            "mydb",
+            None,
+            None,
+            "/tmp/o.sql",
+        );
+        assert_eq!(
+            cmd,
+            "pg_dump -w -h 'localhost' -p 5432 -U 'app' 'mydb' > '/tmp/o.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_restore_mysql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_restore_command(
+            &DatabaseType::MySQL,
+            "localhost",
+            3306,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "/tmp/i.sql",
+        );
+        assert_eq!(
+            cmd,
+            "TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '[client]\\npassword=%s\\n' 's3cret' > $TMPF && mysql --defaults-extra-file=$TMPF -h 'localhost' -P 3306 -u 'app' 'mydb' --binary-mode < '/tmp/i.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_restore_mysql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_restore_command(
+            &DatabaseType::MySQL,
+            "localhost",
+            3306,
+            "app",
+            None,
+            "mydb",
+            "/tmp/i.sql",
+        );
+        assert_eq!(
+            cmd,
+            "mysql -h 'localhost' -P 3306 -u 'app' 'mydb' --binary-mode < '/tmp/i.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_restore_postgresql_with_password() {
+        let cmd = DatabaseCommandBuilder::build_restore_command(
+            &DatabaseType::PostgreSQL,
+            "localhost",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "/tmp/i.sql",
+        );
+        assert_eq!(
+            cmd,
+            "TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' 'localhost' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF psql -w -h 'localhost' -p 5432 -U 'app' -d 'mydb' < '/tmp/i.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_restore_postgresql_without_password() {
+        let cmd = DatabaseCommandBuilder::build_restore_command(
+            &DatabaseType::PostgreSQL,
+            "localhost",
+            5432,
+            "app",
+            None,
+            "mydb",
+            "/tmp/i.sql",
+        );
+        assert_eq!(
+            cmd,
+            "psql -w -h 'localhost' -p 5432 -U 'app' -d 'mydb' < '/tmp/i.sql'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_pg_socket_dir_with_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "/var/run/postgresql",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' '*' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF psql -w -h '/var/run/postgresql' -p 5432 -U 'app' -d 'mydb' -c 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_pg_socket_dir_without_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "/var/run/postgresql",
+            5432,
+            "app",
+            None,
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "psql -w -h '/var/run/postgresql' -p 5432 -U 'app' -d 'mydb' -c 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_mysql_loopback_ip_without_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::MySQL,
+            "127.0.0.1",
+            3306,
+            "app",
+            None,
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "mysql -h '127.0.0.1' -P 3306 -u 'app' 'mydb' --binary-mode -e 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_local_pg_run_socket_dir_with_password() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "/run/postgresql",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' '*' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF psql -w -h '/run/postgresql' -p 5432 -U 'app' -d 'mydb' -c 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_golden_remote_postgresql_ipv6_host_escapes_the_pgpass_colons() {
+        let cmd = DatabaseCommandBuilder::build_query_command(
+            &DatabaseType::PostgreSQL,
+            "2001:db8::1",
+            5432,
+            "app",
+            Some("s3cret"),
+            "mydb",
+            "SELECT 1",
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "unset PGPASSWORD PGSERVICE PGSERVICEFILE PGSYSCONFDIR PGHOSTADDR && TMPF=$(mktemp) && trap 'shred -u \"$TMPF\" 2>/dev/null || rm -f \"$TMPF\"' EXIT && chmod 600 \"$TMPF\" && printf '%s:%s:%s:%s:%s\\n' '2001\\:db8\\:\\:1' '5432' 'mydb' 'app' 's3cret' > $TMPF && PGPASSFILE=$TMPF PGSSLCERT=/nonexistent psql -w -h '2001:db8::1' -p 5432 -U 'app' -d 'mydb' -c 'SELECT 1'"
+        );
+    }
+
+    #[test]
+    fn test_remote_mysql_with_password_reads_only_the_option_file_of_the_call() {
+        for (name, cmd) in [
+            (
+                "query",
+                DatabaseCommandBuilder::build_query_command(
+                    &DatabaseType::MySQL,
+                    "db.example.com",
+                    3306,
+                    "app",
+                    Some("pw"),
+                    "db",
+                    "SELECT 1",
+                    None,
+                ),
+            ),
+            (
+                "dump",
+                DatabaseCommandBuilder::build_dump_command(
+                    &DatabaseType::MySQL,
+                    "db.example.com",
+                    3306,
+                    "app",
+                    Some("pw"),
+                    "db",
+                    None,
+                    None,
+                    "/tmp/o.sql",
+                ),
+            ),
+            (
+                "restore",
+                DatabaseCommandBuilder::build_restore_command(
+                    &DatabaseType::MySQL,
+                    "db.example.com",
+                    3306,
+                    "app",
+                    Some("pw"),
+                    "db",
+                    "/tmp/i.sql",
+                ),
+            ),
+        ] {
+            assert!(!cmd.contains("--defaults-extra-file"), "{name}: {cmd}");
+            let client = ["mysql", "mysqldump"]
+                .iter()
+                .map(|b| format!("{b} --defaults-file=$TMPF -h "))
+                .any(|prefix| cmd.contains(prefix.as_str()));
+            assert!(
+                client,
+                "{name}: option file must be the first argument: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_local_mysql_with_password_keeps_the_extra_option_file() {
+        for host in ["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            let cmd = DatabaseCommandBuilder::build_query_command(
+                &DatabaseType::MySQL,
+                host,
+                3306,
+                "app",
+                Some("pw"),
+                "db",
+                "SELECT 1",
+                None,
+            );
+            assert!(
+                cmd.contains("mysql --defaults-extra-file=$TMPF -h "),
+                "{cmd}"
+            );
+            assert!(!cmd.contains("--defaults-file="), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_every_postgresql_client_runs_with_w() {
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "/var/run/postgresql",
+            "/run/postgresql",
+            "db.example.com",
+        ] {
+            for password in [None, Some("pw")] {
+                let cmds = [
+                    (
+                        "psql -w ",
+                        DatabaseCommandBuilder::build_query_command(
+                            &DatabaseType::PostgreSQL,
+                            host,
+                            5432,
+                            "app",
+                            password,
+                            "db",
+                            "SELECT 1",
+                            None,
+                        ),
+                    ),
+                    (
+                        "pg_dump -w ",
+                        DatabaseCommandBuilder::build_dump_command(
+                            &DatabaseType::PostgreSQL,
+                            host,
+                            5432,
+                            "app",
+                            password,
+                            "db",
+                            None,
+                            None,
+                            "/tmp/o.sql",
+                        ),
+                    ),
+                    (
+                        "psql -w ",
+                        DatabaseCommandBuilder::build_restore_command(
+                            &DatabaseType::PostgreSQL,
+                            host,
+                            5432,
+                            "app",
+                            password,
+                            "db",
+                            "/tmp/i.sql",
+                        ),
+                    ),
+                ];
+                for (needle, cmd) in cmds {
+                    assert!(cmd.contains(needle), "{host}: {cmd}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_remote_postgresql_overrides_the_client_certificate_and_local_does_not() {
+        for password in [None, Some("pw")] {
+            let remote = DatabaseCommandBuilder::build_query_command(
+                &DatabaseType::PostgreSQL,
+                "db.example.com",
+                5432,
+                "app",
+                password,
+                "db",
+                "SELECT 1",
+                None,
+            );
+            assert!(
+                remote.contains(" PGSSLCERT=/nonexistent psql -w -h "),
+                "{remote}"
+            );
+            let local = DatabaseCommandBuilder::build_query_command(
+                &DatabaseType::PostgreSQL,
+                "localhost",
+                5432,
+                "app",
+                password,
+                "db",
+                "SELECT 1",
+                None,
+            );
+            assert!(!local.contains("PGSSLCERT"), "{local}");
+        }
+    }
+
+    #[test]
+    fn test_pgpass_host_field_is_a_wildcard_for_a_socket_directory_only() {
+        for dir in PG_SOCKET_DIRS {
+            let cmd = DatabaseCommandBuilder::build_query_command(
+                &DatabaseType::PostgreSQL,
+                dir,
+                5432,
+                "app",
+                Some("pw"),
+                "db",
+                "SELECT 1",
+                None,
+            );
+            assert!(
+                cmd.contains("printf '%s:%s:%s:%s:%s\\n' '*' '5432' 'db' 'app' 'pw'"),
+                "{cmd}"
+            );
+            assert!(cmd.contains(&format!("-h '{dir}' ")), "{cmd}");
+        }
+        for host in ["localhost", "127.0.0.1", "db.example.com"] {
+            let cmd = DatabaseCommandBuilder::build_query_command(
+                &DatabaseType::PostgreSQL,
+                host,
+                5432,
+                "app",
+                Some("pw"),
+                "db",
+                "SELECT 1",
+                None,
+            );
+            assert!(
+                cmd.contains(&format!("' '{host}' '5432' 'db' 'app' 'pw'")),
+                "{cmd}"
+            );
+        }
     }
 }

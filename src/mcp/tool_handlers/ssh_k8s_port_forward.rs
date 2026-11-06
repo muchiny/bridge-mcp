@@ -30,7 +30,9 @@ pub struct SshK8sPortForwardArgs {
     wait_secs: u64,
     #[serde(default)]
     namespace: Option<String>,
-    /// Bind address for the local side (default `127.0.0.1`).
+    /// Bind address for the local side: `localhost` (lower case only, as
+    /// `kubectl` requires), `127.0.0.1`, `::1` or a comma list of these
+    /// (default `localhost`). Any other address is refused.
     #[serde(default)]
     address: Option<String>,
     #[serde(default)]
@@ -99,7 +101,7 @@ impl StandardTool for K8sPortForward {
             },
             "address": {
                 "type": "string",
-                "description": "Bind address for local side (default: 127.0.0.1)"
+                "description": "Bind address for the local side: localhost (lower case only), 127.0.0.1, ::1 or a comma list of these (default: localhost). Any other address is refused."
             },
             "context": {
                 "type": "string",
@@ -414,23 +416,67 @@ mod tests {
         assert!(cmd.contains("rm -f /tmp/pf.$$"), "cmd: {cmd}");
     }
 
-    #[test]
-    fn test_build_command_with_address() {
-        let args = SshK8sPortForwardArgs {
+    fn args_with_address(address: Option<&str>) -> SshK8sPortForwardArgs {
+        SshK8sPortForwardArgs {
             host: "k8s".into(),
             target: "svc/myapp".into(),
             ports: "8080:80".into(),
-            probe_path: None,
+            probe_path: Some("/healthz".into()),
             wait_secs: 5,
             namespace: None,
-            address: Some("0.0.0.0".into()),
+            address: address.map(Into::into),
             context: None,
             kubectl_bin: Some("kubectl".into()),
             timeout_seconds: None,
             max_output: None,
             save_output: None,
-        };
-        let cmd = K8sPortForward::build_command(&args, &test_host_config()).unwrap();
-        assert!(cmd.contains("--address '0.0.0.0'"), "cmd: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_build_command_with_loopback_address() {
+        for (address, flag) in [
+            ("127.0.0.1", "--address '127.0.0.1'"),
+            ("localhost", "--address 'localhost'"),
+            ("::1", "--address '::1'"),
+            ("localhost,::1", "--address 'localhost,::1'"),
+        ] {
+            let cmd = K8sPortForward::build_command(
+                &args_with_address(Some(address)),
+                &test_host_config(),
+            )
+            .unwrap();
+            assert!(cmd.contains(flag), "{address}: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_build_command_refuses_a_non_loopback_address() {
+        for bad in [
+            "0.0.0.0",
+            "::",
+            "10.0.0.5",
+            "localhost,0.0.0.0",
+            "host.example.com",
+            "LOCALHOST",
+            "",
+        ] {
+            let err =
+                K8sPortForward::build_command(&args_with_address(Some(bad)), &test_host_config())
+                    .unwrap_err();
+            assert!(matches!(err, BridgeError::CommandDenied { .. }), "{bad}");
+            assert!(err.to_string().contains("'address'"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_build_command_probe_curl_ignores_the_curlrc() {
+        let cmd =
+            K8sPortForward::build_command(&args_with_address(None), &test_host_config()).unwrap();
+        assert!(
+            cmd.contains(" curl -q -sS -m 5 -o /dev/null "),
+            "cmd: {cmd}"
+        );
+        assert!(!cmd.contains("--address"), "cmd: {cmd}");
     }
 }

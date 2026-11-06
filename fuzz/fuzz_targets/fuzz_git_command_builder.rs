@@ -52,6 +52,50 @@ fuzz_target!(|data: &str| {
     let cmd = GitCommandBuilder::build_pull_command(data, Some(data), Some(data), true, true);
     assert_arrives_as_text(&cmd, data, "pull");
 
+    // pull: the second property. A `remote` the validator accepts is the name
+    // of a configured remote and nothing else: no URL (`:` `@`), no path (`/`
+    // `\`), no option (leading `-`), no `.`-leading name, no whitespace or
+    // shell syntax. A `branch` with no `remote` is always refused (git would
+    // read it as the repository) and is never emitted.
+    if GitCommandBuilder::validate_pull_target(Some(data), None).is_ok() {
+        assert!(
+            !data.is_empty() && !data.starts_with(['-', '.']),
+            "remote {data:?}"
+        );
+        assert!(
+            data.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')),
+            "remote {data:?}"
+        );
+    }
+    assert!(GitCommandBuilder::validate_pull_target(None, Some(data)).is_err());
+    let cmd = GitCommandBuilder::build_pull_command("/r", None, Some(data), false, false);
+    assert_eq!(
+        cmd,
+        "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+         git -C '/r' -c http.extraHeader= pull"
+    );
+
+    // `clone` drops the client certificate variables and resets the unscoped
+    // extra header before anything the caller chose, whatever the arguments.
+    let cmd = GitCommandBuilder::build_clone_command(data, None, None, None, false);
+    assert!(
+        cmd.starts_with(
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -c http.extraHeader= clone -- "
+        ),
+        "{cmd}"
+    );
+
+    // `pull` drops them too, whatever the path.
+    let cmd = GitCommandBuilder::build_pull_command(data, None, None, false, false);
+    assert!(
+        cmd.starts_with(
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && git -C "
+        ),
+        "{cmd}"
+    );
+
     // clone
     let cmd =
         GitCommandBuilder::build_clone_command(data, Some(data), Some(data), Some(1), true);

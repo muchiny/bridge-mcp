@@ -86,26 +86,39 @@ pub fn helm_detect_prefix(helm_bin: Option<&str>) -> String {
     }
 }
 
-/// The root-owned directories (and the home form) a `kubeconfig` may be in.
+/// The root-owned system directories a `kubeconfig` may be in (any file in
+/// them, one level or deeper).
 ///
-/// A kubeconfig can name an exec credential plugin that the client runs, as
-/// root when the tool elevates, so a file the caller could have written (in
-/// `/tmp`, in another user's home) must not be accepted. `~/.kube/` and
-/// `$HOME/.kube/` are kept literal: the remote shell expands them, so the SSH
-/// user's own home is named that way rather than by its absolute path.
+/// A kubeconfig names the server the client talks to and can name the files
+/// that hold its credential (`tokenFile`, client certificate and key) or a
+/// program the client runs (`exec` credential plugin, as root when the tool
+/// elevates). A file another tool of this server could have written (in
+/// `/tmp`, in a user's home) could therefore point the client at a server of
+/// the caller's choosing while it reuses the host's credential files, so only
+/// directories that belong to root are accepted here.
 const KUBECONFIG_DIRS: &[&str] = &[
     "/etc/rancher/k3s/",
     "/etc/rancher/rke2/",
     "/etc/kubernetes/",
     "/var/snap/microk8s/current/credentials/",
     "/var/lib/k0s/pki/",
-    "/root/.kube/",
-    "~/.kube/",
-    "$HOME/.kube/",
 ];
+
+/// The standard kubeconfig of a home directory, exactly: no other file of a
+/// `.kube` directory is accepted, because the SSH user can write there (and
+/// `/root/.kube/` is that directory when the SSH user is root). The client
+/// reads this file by default when `KUBECONFIG` is not set. `~/.kube/config`
+/// and `$HOME/.kube/config` are kept literal: the remote shell expands them,
+/// so the SSH user's own home is named that way rather than by its absolute
+/// path.
+const KUBECONFIG_HOME_FILES: &[&str] =
+    &["/root/.kube/config", "~/.kube/config", "$HOME/.kube/config"];
 
 /// Whether `path` is a kubeconfig location [`validate_kubeconfig`] accepts.
 fn is_allowed_kubeconfig(path: &str) -> bool {
+    if KUBECONFIG_HOME_FILES.contains(&path) {
+        return true;
+    }
     let Some(tail) = KUBECONFIG_DIRS
         .iter()
         .find_map(|dir| path.strip_prefix(dir))
@@ -117,12 +130,16 @@ fn is_allowed_kubeconfig(path: &str) -> bool {
 
 /// Validate a `kubeconfig` argument of a helm tool.
 ///
-/// The value must start with `/etc/rancher/k3s/`, `/etc/rancher/rke2/`,
-/// `/etc/kubernetes/`, `/var/snap/microk8s/current/credentials/`,
-/// `/var/lib/k0s/pki/`, `/root/.kube/`, `~/.kube/` or `$HOME/.kube/`, followed by a file path made of `[A-Za-z0-9/._-]` with
-/// no empty, `.` or `..` segment. Any other file could have been written by
-/// the caller, and a kubeconfig can make the client run a command (`exec`
-/// credential plugin), as root when the tool elevates.
+/// The value must be exactly `/root/.kube/config`, `~/.kube/config` or
+/// `$HOME/.kube/config`, or start with `/etc/rancher/k3s/`,
+/// `/etc/rancher/rke2/`, `/etc/kubernetes/`,
+/// `/var/snap/microk8s/current/credentials/` or `/var/lib/k0s/pki/`, followed
+/// by a file path made of `[A-Za-z0-9/._-]` with no empty, `.` or `..`
+/// segment. The system directories belong to root; in a home directory only
+/// the standard file is accepted, because any other file there is writable by
+/// the SSH user and a kubeconfig can point the client at another server (while
+/// it reuses the credential files of the host) or make it run a command
+/// (`exec` credential plugin, as root when the tool elevates).
 ///
 /// # Errors
 ///
@@ -134,10 +151,12 @@ pub fn validate_kubeconfig(kubeconfig: &str) -> Result<()> {
         Err(BridgeError::CommandDenied {
             reason: format!(
                 "kubeconfig '{kubeconfig}' is not allowed: use a file under /etc/rancher/k3s/, \
-                 /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/, \
-                 /var/lib/k0s/pki/, /root/.kube/, ~/.kube/ or $HOME/.kube/ (letters, digits, \
-                 '/', '.', '_' and '-' only, no '..'; name your own home ~/, not /home/...); \
-                 a kubeconfig can make the client run a command"
+                 /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ \
+                 or /var/lib/k0s/pki/ (letters, digits, '/', '.', '_' and '-' only, no '..'), \
+                 or exactly /root/.kube/config, ~/.kube/config or $HOME/.kube/config (name your \
+                 own home ~/, not /home/...; or omit 'kubeconfig', the client reads \
+                 ~/.kube/config by default); a kubeconfig can point the client at another \
+                 server or make it run a command"
             ),
         })
     }
@@ -150,6 +169,46 @@ pub fn validate_kubeconfig(kubeconfig: &str) -> Result<()> {
 /// Returns [`BridgeError::CommandDenied`] when a value is given and refused.
 pub fn validate_kubeconfig_opt(kubeconfig: Option<&str>) -> Result<()> {
     kubeconfig.map_or(Ok(()), validate_kubeconfig)
+}
+
+/// Whether one element of the `address` list designates the local machine
+/// for `kubectl port-forward --address`: exactly `localhost` (lower case) or
+/// an IP address that is a loopback address once canonicalised.
+///
+/// `kubectl` (`client-go` `parseAddresses`) compares the element with the
+/// exact string `localhost` and parses anything else as an IP address, so
+/// `LOCALHOST` is refused by the client; it is refused here too, which keeps
+/// the verdict of this check the one of the command that runs.
+fn is_port_forward_loopback(address: &str) -> bool {
+    address == "localhost"
+        || (!address.eq_ignore_ascii_case("localhost") && super::shell::is_loopback_host(address))
+}
+
+/// Validate the `address` argument of `ssh_k8s_port_forward`
+/// (`kubectl port-forward --address`).
+///
+/// The forward may only listen on the local machine: `localhost` (lower case
+/// only: `kubectl` refuses other spellings), `127.0.0.1`, `::1` (any loopback
+/// IP address) or a comma list of these, which `--address` accepts. A
+/// listener on another address is reachable from the network with the
+/// cluster access of the host's kubeconfig.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::CommandDenied`] naming `address` for an empty value
+/// or any element that is not a loopback address.
+pub fn validate_port_forward_address(address: &str) -> Result<()> {
+    if !address.is_empty() && address.split(',').all(is_port_forward_loopback) {
+        Ok(())
+    } else {
+        Err(BridgeError::CommandDenied {
+            reason: format!(
+                "'address' '{address}' is not allowed: the port-forward may only listen on \
+                 the local machine: use localhost (lower case), 127.0.0.1 or ::1 (or a comma \
+                 list of these), or omit 'address'"
+            ),
+        })
+    }
 }
 
 /// Generate an optional `KUBECONFIG=<path>` environment prefix.
@@ -3693,13 +3752,17 @@ impl KubernetesCommandBuilder {
     /// * `probe_path` — Optional HTTP path to curl after the forward is up, e.g. `/healthz`.
     /// * `wait_secs` — Bounded sleep window (1–30 s).
     /// * `namespace` — Optional Kubernetes namespace.
-    /// * `address` — Optional `--address` bind address (default 127.0.0.1).
+    /// * `address` — Optional `--address` bind address (default `localhost`).
+    ///   Only `localhost`, `127.0.0.1`, `::1` (any loopback address) or a
+    ///   comma list of these: see [`validate_port_forward_address`].
     /// * `context` — Optional kubeconfig context.
+    ///
+    /// The probe `curl` starts with `-q`, so the host's `~/.curlrc` is not read.
     ///
     /// # Errors
     ///
-    /// Returns an error if namespace, context, `probe_path`, `wait_secs`, or
-    /// port extraction fails validation.
+    /// Returns an error if `address`, namespace, context, `probe_path`,
+    /// `wait_secs`, or port extraction fails validation.
     #[allow(clippy::too_many_arguments)]
     pub fn build_port_forward_command(
         kubectl_bin: Option<&str>,
@@ -3712,6 +3775,9 @@ impl KubernetesCommandBuilder {
         context: Option<&str>,
     ) -> Result<String> {
         super::shell::refuse_option_like("target", target)?;
+        if let Some(addr) = address {
+            validate_port_forward_address(addr)?;
+        }
         if let Some(ns) = namespace {
             Self::validate_namespace(ns)?;
         }
@@ -3776,7 +3842,7 @@ impl KubernetesCommandBuilder {
             let _ = write!(
                 cmd,
                 " echo '=== probe ==='; \
-                 curl -sS -m 5 -o /dev/null -w 'HTTP %{{http_code}} in %{{time_total}}s\\n' \
+                 curl -q -sS -m 5 -o /dev/null -w 'HTTP %{{http_code}} in %{{time_total}}s\\n' \
                  {url_esc} || echo 'probe FAILED';"
             );
         }
@@ -4387,7 +4453,7 @@ PORTS:.subsets[*].ports[*].port'{ctx_flag}; \
              sleep {wait_esc}; \
              if kill -0 $PF 2>/dev/null; then \
                echo {banner_esc}; \
-               curl -sS -m 8 {url_esc} \
+               curl -q -sS -m 8 {url_esc} \
                  || echo 'curl FAILED'; \
              else \
                echo '=== port-forward DIED ==='; cat /tmp/tpf.$$; \
@@ -6477,7 +6543,6 @@ mod tests {
             "/root/.kube/config",
             "~/.kube/config",
             "$HOME/.kube/config",
-            "$HOME/.kube/cache/c.yaml",
         ] {
             assert!(validate_kubeconfig(ok).is_ok(), "{ok}");
             assert_eq!(kubeconfig_env_prefix(Some(ok)), format!("KUBECONFIG={ok} "));
@@ -6500,10 +6565,28 @@ mod tests {
             "/etc/kubernetes-evil/x",
             "~/.kube/../x",
             "~/.kube/",
+            "~/.kube/config2",
+            "~/.kube/config/",
+            "~/.kube/config.bak",
+            "~/.kube/other",
+            "~/.kube/cache/c.yaml",
+            "~/.kube/./config",
+            "~/.kube//config",
+            "~/.kube/config/x",
+            "$HOME/.kube/",
+            "$HOME/.kube/other",
+            "$HOME/.kube/cache/c.yaml",
+            "$HOME/.kube/config2",
             "$HOME/.kube/$(id)",
             "$HOME/.kube/a b",
+            "$HOME/.kube/config ",
+            "/root/.kube/",
+            "/root/.kube/other",
+            "/root/.kube/cache/c.yaml",
+            "/root/.kube/config/x",
             "~root/.kube/config",
             "$HOME/.kubex/config",
+            "${HOME}/.kube/config",
             "relative/kc",
             "",
             "-x",
@@ -6512,6 +6595,37 @@ mod tests {
             assert!(validate_kubeconfig_opt(Some(bad)).is_err(), "{bad}");
             assert_eq!(kubeconfig_env_prefix(Some(bad)), "", "{bad}");
         }
+    }
+
+    #[test]
+    fn test_validate_kubeconfig_names_the_argument_and_the_alternatives() {
+        let msg = validate_kubeconfig("~/.kube/other")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("kubeconfig '~/.kube/other' is not allowed"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("exactly /root/.kube/config, ~/.kube/config or $HOME/.kube/config"),
+            "{msg}"
+        );
+        assert!(msg.contains("omit 'kubeconfig'"), "{msg}");
+    }
+
+    #[test]
+    fn test_kubeconfig_env_prefix_of_the_home_file_is_unquoted_for_the_shell() {
+        assert_eq!(
+            kubeconfig_env_prefix(Some("~/.kube/config")),
+            "KUBECONFIG=~/.kube/config "
+        );
+        assert_eq!(
+            kubeconfig_env_prefix(Some("$HOME/.kube/config")),
+            "KUBECONFIG=$HOME/.kube/config "
+        );
+        assert_eq!(kubeconfig_env_prefix(Some("~/.kube/other")), "");
+        assert_eq!(kubeconfig_env_prefix(Some("$HOME/.kube/cache/c.yaml")), "");
+        assert_eq!(kubeconfig_env_prefix(Some("/root/.kube/other")), "");
     }
 
     #[test]
@@ -8769,6 +8883,173 @@ mod tests {
     }
 
     #[test]
+    fn test_port_forward_probe_curl_starts_with_dash_q() {
+        let cmd = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            Some("/healthz"),
+            5,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains(
+                "curl -q -sS -m 5 -o /dev/null -w 'HTTP %{http_code} in %{time_total}s\\n' \
+                 'http://127.0.0.1:8080/healthz' || echo 'probe FAILED';"
+            ),
+            "cmd: {cmd}"
+        );
+        assert_eq!(cmd.matches("curl").count(), 1, "cmd: {cmd}");
+        assert!(!cmd.contains("curl -sS"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_port_forward_without_probe_has_no_curl() {
+        let cmd = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            None,
+            5,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!cmd.contains("curl"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_port_forward_address_loopback_is_kept() {
+        for (address, flag) in [
+            ("localhost", " --address 'localhost'"),
+            ("127.0.0.1", " --address '127.0.0.1'"),
+            ("::1", " --address '::1'"),
+            (
+                "localhost,127.0.0.1,::1",
+                " --address 'localhost,127.0.0.1,::1'",
+            ),
+            ("127.0.0.1,::1", " --address '127.0.0.1,::1'"),
+        ] {
+            let cmd = KubernetesCommandBuilder::build_port_forward_command(
+                Some("kubectl"),
+                "svc/web",
+                "8080:80",
+                None,
+                5,
+                None,
+                Some(address),
+                None,
+            )
+            .unwrap();
+            let expected = format!("port-forward 'svc/web' '8080:80'{flag} >/tmp/pf.$$");
+            assert!(cmd.contains(&expected), "{address}: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_port_forward_address_default_has_no_address_flag() {
+        let cmd = KubernetesCommandBuilder::build_port_forward_command(
+            Some("kubectl"),
+            "svc/web",
+            "8080:80",
+            None,
+            5,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!cmd.contains("--address"), "cmd: {cmd}");
+        assert!(
+            cmd.contains("port-forward 'svc/web' '8080:80' >/tmp/pf.$$ 2>&1 & PF=$!;"),
+            "cmd: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_port_forward_address_refuses_anything_but_loopback() {
+        for bad in [
+            "0.0.0.0",
+            "::",
+            "[::]",
+            "10.0.0.5",
+            "192.168.1.10",
+            "example.com",
+            "localhost.example.com",
+            "localhost,0.0.0.0",
+            "0.0.0.0,localhost",
+            "127.0.0.1,10.0.0.5",
+            "localhost,",
+            ",localhost",
+            "localhost,,::1",
+            "localhost, ::1",
+            " localhost",
+            "",
+            "-x",
+            "127.0.0.1;id",
+            "localhost\n0.0.0.0",
+            "::ffff:10.0.0.5",
+        ] {
+            let e = KubernetesCommandBuilder::build_port_forward_command(
+                Some("kubectl"),
+                "svc/web",
+                "8080:80",
+                None,
+                5,
+                None,
+                Some(bad),
+                None,
+            )
+            .unwrap_err();
+            assert!(matches!(e, BridgeError::CommandDenied { .. }), "{bad}");
+            let msg = e.to_string();
+            assert!(msg.contains("'address'"), "{bad}: {msg}");
+            assert!(
+                msg.contains("localhost (lower case), 127.0.0.1 or ::1")
+                    && msg.contains("omit 'address'"),
+                "{bad}: {msg}"
+            );
+            assert!(validate_port_forward_address(bad).is_err(), "{bad}");
+        }
+        assert!(validate_port_forward_address("localhost").is_ok());
+    }
+
+    #[test]
+    fn test_validate_port_forward_address_localhost_is_lower_case_only() {
+        for ok in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "localhost,::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(validate_port_forward_address(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "LOCALHOST",
+            "Localhost",
+            "localHOST",
+            "localhost,LOCALHOST",
+            "LOCALHOST,127.0.0.1",
+            "localhost ",
+            " localhost",
+            "127.1",
+            "0.0.0.0",
+            "[::1]",
+        ] {
+            let e = validate_port_forward_address(bad).unwrap_err();
+            assert!(matches!(e, BridgeError::CommandDenied { .. }), "{bad}");
+            let msg = e.to_string();
+            assert!(msg.contains("'address'"), "{bad}: {msg}");
+            assert!(msg.contains("localhost (lower case)"), "{bad}: {msg}");
+        }
+    }
+
+    #[test]
     fn test_traefik_introspect_url_and_banner_are_quoted_once() {
         let cmd = KubernetesCommandBuilder::build_traefik_introspect_command(
             Some("kubectl"),
@@ -8780,10 +9061,31 @@ mod tests {
         )
         .unwrap();
         assert!(
-            cmd.contains("curl -sS -m 8 'http://127.0.0.1:8080/api/;id;'"),
+            cmd.contains("curl -q -sS -m 8 'http://127.0.0.1:8080/api/;id;'"),
             "cmd: {cmd}"
         );
         assert!(cmd.contains("echo '=== GET /api/;id; ==='"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn test_traefik_introspect_curl_starts_with_dash_q() {
+        let cmd = KubernetesCommandBuilder::build_traefik_introspect_command(
+            Some("kubectl"),
+            "/rawdata",
+            None,
+            8080,
+            5,
+            None,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains(
+                "curl -q -sS -m 8 'http://127.0.0.1:8080/api/rawdata' || echo 'curl FAILED';"
+            ),
+            "cmd: {cmd}"
+        );
+        assert_eq!(cmd.matches("curl").count(), 2, "cmd: {cmd}");
+        assert!(!cmd.contains("curl -sS"), "cmd: {cmd}");
     }
 
     #[test]

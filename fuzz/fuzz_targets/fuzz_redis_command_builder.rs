@@ -28,15 +28,49 @@ fuzz_target!(|data: &str| {
     // validate_redis_command
     let _ = RedisCommandBuilder::validate_redis_command(data);
 
+    // validate_connection: the host and the password are the same input here
+    let _ = RedisCommandBuilder::validate_connection(Some(data), Some(data));
+
     // info
-    let cmd = RedisCommandBuilder::build_info_command(Some(data), Some(6379), Some(data));
+    let cmd = RedisCommandBuilder::build_info_command(Some(data), Some(6379), Some(data), None);
     assert_arrives_as_text(&cmd, data, "info");
+    assert_credential_scoped(&cmd, data);
 
     // cli
-    let cmd = RedisCommandBuilder::build_cli_command(Some(data), Some(6379), data);
+    let cmd = RedisCommandBuilder::build_cli_command(Some(data), Some(6379), data, None);
     assert_arrives_as_text(&cmd, data, "cli");
+    assert_credential_scoped(&cmd, data);
 
     // keys
-    let cmd = RedisCommandBuilder::build_keys_command(Some(data), Some(6379), Some(data), Some(100));
+    let cmd = RedisCommandBuilder::build_keys_command(
+        Some(data),
+        Some(6379),
+        Some(data),
+        Some(100),
+        None,
+    );
     assert_arrives_as_text(&cmd, data, "keys");
+    assert_credential_scoped(&cmd, data);
+
+    // With a password: it arrives as text.
+    let cmd = RedisCommandBuilder::build_cli_command(Some(data), None, "PING", Some(data));
+    assert_arrives_as_text(&cmd, data, "cli password");
+    assert_credential_scoped(&cmd, data);
+    // The password never becomes an option of `redis-cli`: it is fed on the
+    // standard input of `--askpass`.
+    assert!(cmd.contains(" | redis-cli --askpass"), "{cmd}");
 });
+
+/// The ambient `REDISCLI_AUTH` reaches only a local server: unless the host
+/// is `localhost` or a loopback address, the command drops it first.
+fn assert_credential_scoped(cmd: &str, host: &str) {
+    let local = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback());
+    assert_eq!(
+        cmd.starts_with("unset REDISCLI_AUTH VALKEYCLI_AUTH && "),
+        !local,
+        "{host:?}: {cmd}"
+    );
+}

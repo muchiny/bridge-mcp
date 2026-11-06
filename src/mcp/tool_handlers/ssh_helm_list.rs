@@ -113,7 +113,7 @@ impl StandardTool for HelmListTool {
             },
             "kubeconfig": {
                 "type": "string",
-                "description": "Path to kubeconfig file, only under /etc/rancher/k3s/, /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ or ~/.kube/ (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
+                "description": "Path to kubeconfig file, only under /etc/rancher/k3s/, /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ or /var/lib/k0s/pki/, or exactly /root/.kube/config, ~/.kube/config or $HOME/.kube/config (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -522,7 +522,15 @@ mod tests {
 
     #[test]
     fn test_kubeconfig_outside_known_directories_is_refused() {
-        for bad in ["/tmp/kc", "/etc/rancher/k3s/../../../tmp/kc", "/home/u/kc"] {
+        for bad in [
+            "/tmp/kc",
+            "/etc/rancher/k3s/../../../tmp/kc",
+            "/home/u/kc",
+            "~/.kube/other",
+            "~/.kube/cache/c.yaml",
+            "$HOME/.kube/other",
+            "/root/.kube/other",
+        ] {
             let args: SshHelmListArgs =
                 serde_json::from_value(json!({"host": "h", "kubeconfig": bad})).unwrap();
             let err = HelmListTool::build_command(&args, &test_host_config()).unwrap_err();
@@ -541,5 +549,15 @@ mod tests {
             cmd.contains("KUBECONFIG=/etc/rancher/rke2/rke2.yaml "),
             "{cmd}"
         );
+    }
+
+    #[test]
+    fn test_standard_home_kubeconfig_is_kept() {
+        for path in ["~/.kube/config", "$HOME/.kube/config", "/root/.kube/config"] {
+            let args: SshHelmListArgs =
+                serde_json::from_value(json!({"host": "h", "kubeconfig": path})).unwrap();
+            let cmd = HelmListTool::build_command(&args, &test_host_config()).unwrap();
+            assert!(cmd.contains(&format!("KUBECONFIG={path} ")), "{cmd}");
+        }
     }
 }

@@ -39,11 +39,14 @@ impl StandardTool for LdapUserInfoTool {
     const DESCRIPTION: &'static str = "Look up a specific user in an LDAP directory on a remote \
         host using ldapsearch (-x -LLL). Runs filter '(uid=<username>)' with scope sub and returns \
         all attributes. Use this instead of ssh_ldap_search when you know the exact uid; use \
-        ssh_ldap_search for arbitrary filters or attribute projection. For group membership queries \
-        use ssh_ldap_group_members. On Windows Active Directory hosts use ssh_ad_user_info instead \
-        (PowerShell-based, richer AD attributes). Authentication uses the remote host's system \
-        ldap.conf / SASL configuration (e.g. EXTERNAL, GSSAPI); no credentials are passed on the \
-        command line.";
+        ssh_ldap_search for arbitrary filters or attribute projection. For group membership \
+        queries use ssh_ldap_group_members. On Windows Active Directory hosts use \
+        ssh_ad_user_info instead (PowerShell-based, richer AD attributes). Simple bind (-x), \
+        anonymous: no bind DN, password or SASL \
+        mechanism (EXTERNAL, GSSAPI) is used and no credential is passed on the command line. \
+        The TLS trust settings of the host's ldap.conf apply (TLS_CACERT, TLS_REQCERT); its TLS \
+        client certificate (TLS_CERT/TLS_KEY) is presented only to a server of the host itself \
+        (ldapi://, localhost or a loopback address), never to another 'uri'.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -62,7 +65,7 @@ impl StandardTool for LdapUserInfoTool {
             },
             "uri": {
                 "type": "string",
-                "description": "LDAP URI (e.g. 'ldap://ldap.example.com'). Uses system default if omitted."
+                "description": "One ldap://, ldaps:// or ldapi:// URI of the form scheme://host[:port] (e.g. 'ldaps://ldap.example.com'); no list, path or query. Uses the server of the host's ldap.conf if omitted. The host's TLS client certificate is presented only to a local server (ldapi://, localhost, loopback address), not to another host."
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -89,6 +92,12 @@ impl StandardTool for LdapUserInfoTool {
             &args.username,
             args.uri.as_deref(),
         ))
+    }
+
+    fn validate(args: &SshLdapUserInfoArgs, _host_config: &HostConfig) -> Result<()> {
+        args.uri
+            .as_deref()
+            .map_or(Ok(()), LdapCommandBuilder::validate_uri)
     }
 }
 
@@ -121,7 +130,11 @@ mod tests {
         let ctx = create_test_context();
         let result = handler
             .execute(
-                Some(json!({"host": "nonexistent", "base_dn": "dc=example,dc=com", "username": "jdoe"})),
+                Some(json!({
+                    "host": "nonexistent",
+                    "base_dn": "dc=example,dc=com",
+                    "username": "jdoe"
+                })),
                 &ctx,
             )
             .await;
@@ -303,5 +316,76 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_refuses_a_uri_that_is_not_one_ldap_uri() {
+        use crate::ports::mock::create_test_context_with_host;
+        let handler = SshLdapUserInfoHandler::new();
+        let ctx = create_test_context_with_host();
+        for uri in [
+            "",
+            "ldap://a ldap://b",
+            "ldap://a,ldap://b",
+            "ldap://user@h",
+            "ldap://h/dc=x",
+            "http://h",
+            "ldap://$(id)",
+            "-H",
+        ] {
+            let result = handler
+                .execute(
+                    Some(json!({
+                        "host": "server1",
+                        "base_dn": "dc=x",
+                        "username": "jdoe",
+                        "uri": uri
+                    })),
+                    &ctx,
+                )
+                .await;
+            match result.unwrap_err() {
+                BridgeError::CommandDenied { reason } => {
+                    assert!(reason.contains("'uri'"), "{uri:?}: {reason}");
+                }
+                e => panic!("Expected CommandDenied for {uri:?}, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_certificate_of_the_host_goes_to_a_local_server_only() {
+        let host = test_host_config();
+        let args: SshLdapUserInfoArgs = serde_json::from_value(json!({
+            "host": "server1",
+            "base_dn": "dc=x",
+            "username": "jdoe",
+            "uri": "ldap://10.0.0.5"
+        }))
+        .unwrap();
+        assert_eq!(
+            LdapUserInfoTool::build_command(&args, &host).unwrap(),
+            "LDAPTLS_CERT= LDAPTLS_KEY= ldapsearch -x -LLL -H 'ldap://10.0.0.5' -b 'dc=x' \
+             -s 'sub' -- '(uid=jdoe)'"
+        );
+        let args: SshLdapUserInfoArgs = serde_json::from_value(json!({
+            "host": "server1",
+            "base_dn": "dc=x",
+            "username": "jdoe",
+            "uri": "ldap://127.0.0.1"
+        }))
+        .unwrap();
+        assert_eq!(
+            LdapUserInfoTool::build_command(&args, &host).unwrap(),
+            "ldapsearch -x -LLL -H 'ldap://127.0.0.1' -b 'dc=x' -s 'sub' -- '(uid=jdoe)'"
+        );
+        assert!(LdapUserInfoTool::validate(&args, &host).is_ok());
+    }
+
+    #[test]
+    fn test_description_does_not_claim_sasl_or_ldap_conf_credentials() {
+        assert!(!LdapUserInfoTool::DESCRIPTION.contains("ldap.conf / SASL configuration"));
+        assert!(LdapUserInfoTool::DESCRIPTION.contains("Simple bind (-x), anonymous"));
+        assert!(LdapUserInfoTool::SCHEMA.contains("ldapi://"));
     }
 }

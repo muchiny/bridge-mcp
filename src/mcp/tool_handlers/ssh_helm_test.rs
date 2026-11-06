@@ -79,7 +79,7 @@ impl StandardTool for HelmTestTool {
             },
             "kubeconfig": {
                 "type": "string",
-                "description": "Path to kubeconfig file, only under /etc/rancher/k3s/, /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ or ~/.kube/ (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
+                "description": "Path to kubeconfig file, only under /etc/rancher/k3s/, /etc/rancher/rke2/, /etc/kubernetes/, /var/snap/microk8s/current/credentials/ or /var/lib/k0s/pki/, or exactly /root/.kube/config, ~/.kube/config or $HOME/.kube/config (e.g., /etc/rancher/k3s/k3s.yaml for K3s)"
             },
             "helm_bin": {
                 "type": "string",

@@ -29,6 +29,29 @@ const COMPOSE_PLUGIN_DIRS: &[&str] = &[
     "/usr/local/lib/docker/cli-plugins",
 ];
 
+/// Environment assignments placed directly in front of the compose program.
+///
+/// A compose file may itself name remote resources (`include:` with a Git
+/// repository URL or an `oci://` reference). Loading one runs the host's Git
+/// client or registry authentication against a server the compose file names,
+/// with the host's own credential sources (unscoped Git configuration, netrc,
+/// credential helpers, registry logins), and `validate_compose_path` only
+/// constrains the `file` argument, not the content of a file that is already
+/// on the host. Docker Compose v2 reads `COMPOSE_EXPERIMENTAL_GIT_REMOTE` and
+/// `COMPOSE_EXPERIMENTAL_OCI_REMOTE` as booleans and, when the value is false,
+/// refuses the matching loader ("remote resource is disabled") before any
+/// network access, so a local compose file still loads and a remote one does
+/// not. A compose version or provider with no such loader ignores them.
+///
+/// The assignments are shell prefix assignments: they bind for the one command
+/// they precede, whatever its first word is (a plain program name or the
+/// `$(...)` auto-detection of [`docker_compose_detect_prefix`], which expands to
+/// the command word before the assignments take effect), they override a value
+/// inherited from the environment, and a read-only variable of the same name
+/// makes the shell refuse the command instead of running it.
+pub(super) const COMPOSE_REMOTE_OFF: &str =
+    "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false ";
+
 /// Generate the docker binary detection prefix.
 ///
 /// If `docker_bin` names a container CLI (`docker`, `podman`, `podman-remote`
@@ -270,8 +293,13 @@ impl DockerCommandBuilder {
 
     /// Build a docker compose command.
     ///
-    /// Constructs: `cd -- {project_dir} && {compose} [-f {file}] {action}
-    /// [--detach] [--build] [--timeout {t}] [services...]`
+    /// Constructs: `cd -- {project_dir} && {COMPOSE_REMOTE_OFF}{compose} [-f {file}]
+    /// {action} [--detach] [--build] [--timeout {t}] [services...]`
+    ///
+    /// The `COMPOSE_REMOTE_OFF` assignments sit directly in front of the compose program so
+    /// that a compose file already on the host cannot make compose load a Git
+    /// or OCI resource it names (`include:` with a Git URL or an `oci://`
+    /// reference).
     ///
     /// Action-specific flags:
     /// - `detach` and `build` only apply to `up`
@@ -290,7 +318,7 @@ impl DockerCommandBuilder {
     ) -> String {
         let prefix = docker_compose_detect_prefix(compose_bin);
         let escaped_dir = shell_escape(project_dir);
-        let mut cmd = format!("cd -- {escaped_dir} && {prefix}");
+        let mut cmd = format!("cd -- {escaped_dir} && {COMPOSE_REMOTE_OFF}{prefix}");
 
         if let Some(f) = file {
             let _ = write!(cmd, "-f {} ", shell_escape(f));
@@ -407,6 +435,60 @@ impl DockerCommandBuilder {
 
         let _ = write!(cmd, " {}", shell_escape(network));
         cmd
+    }
+
+    /// Validate a compose file argument: a path on the target host, never a
+    /// remote resource.
+    ///
+    /// `docker compose -f` (and the compose provider behind `podman compose`)
+    /// reads a Git repository URL, an `oci://` artifact, a `host:path` or
+    /// `git@host:path` reference, a `github.com/...` path (which compose may
+    /// read as a Git reference, depending on its version), or standard input
+    /// (`-`) in place of a file. Fetching one runs the host's Git or
+    /// registry client with the host's own credential sources against a
+    /// server the caller chose, so only a local path is accepted: made of
+    /// `[A-Za-z0-9/._-]`, not starting with `-`, and either absolute, starting
+    /// with `./` or `../`, or a bare file name (a relative path whose first
+    /// segment could be read as a host name, such as `github.com/x/y`, must be
+    /// written `./github.com/x/y`). `arg` names the argument in the message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::CommandDenied`] naming `arg` when `value` is
+    /// empty, contains a character outside the set, starts with `-`, or is a
+    /// relative path with a directory part that does not start with `./` or
+    /// `../`.
+    pub fn validate_compose_path(arg: &str, value: &str) -> Result<()> {
+        let plain = !value.is_empty()
+            && !value.starts_with('-')
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'));
+        if !plain {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "'{arg}' must be a path on the target host made of letters, digits, '/', \
+                     '.', '_' and '-', not starting with '-': compose reads URLs, Git and OCI \
+                     references, 'host:path' forms and standard input as remote or implicit \
+                     resources. Use an absolute path or a path relative to the working directory"
+                ),
+            });
+        }
+        let anchored = value.starts_with('/')
+            || value.starts_with("./")
+            || value.starts_with("../")
+            || !value.contains('/');
+        if !anchored {
+            return Err(BridgeError::CommandDenied {
+                reason: format!(
+                    "'{arg}' is a relative path whose first segment could be read as a remote \
+                     host (compose may read 'github.com/...' as a Git reference, depending on \
+                     its version): write it with a leading './' (for example './{value}') or as \
+                     an absolute path"
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Validate a compose action.
@@ -839,8 +921,11 @@ mod tests {
             false,
             None,
         );
-        assert!(cmd.starts_with("cd -- '/opt/app' && docker compose "));
-        assert!(cmd.contains("up --detach"));
+        assert_eq!(
+            cmd,
+            "cd -- '/opt/app' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+             COMPOSE_EXPERIMENTAL_OCI_REMOTE=false docker compose up --detach"
+        );
     }
 
     #[test]
@@ -982,11 +1067,12 @@ mod tests {
             true,
             None,
         );
-        assert!(cmd.starts_with("cd -- '/home/deploy/myapp' && docker-compose "));
-        assert!(cmd.contains("-f 'compose.yaml'"));
-        assert!(cmd.contains("up --detach --build"));
-        assert!(cmd.contains("'api'"));
-        assert!(cmd.contains("'worker'"));
+        assert_eq!(
+            cmd,
+            "cd -- '/home/deploy/myapp' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+             COMPOSE_EXPERIMENTAL_OCI_REMOTE=false docker-compose -f 'compose.yaml' \
+             up --detach --build 'api' 'worker'"
+        );
     }
 
     #[test]
@@ -995,6 +1081,64 @@ mod tests {
             None, "ps", "/opt/app", None, None, false, false, None,
         );
         assert!(cmd.contains("docker compose version"));
+        assert_eq!(
+            cmd,
+            format!(
+                "cd -- '/opt/app' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+                 COMPOSE_EXPERIMENTAL_OCI_REMOTE=false {}ps",
+                docker_compose_detect_prefix(None)
+            )
+        );
+    }
+
+    #[test]
+    fn test_compose_auto_detect_golden_string() {
+        let cmd = DockerCommandBuilder::build_compose_command(
+            None, "ps", "/opt/app", None, None, false, false, None,
+        );
+        assert_eq!(
+            cmd,
+            "cd -- '/opt/app' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+             COMPOSE_EXPERIMENTAL_OCI_REMOTE=false \
+             $(if docker compose version >/dev/null 2>&1 2>&1; then echo 'docker compose'; \
+             elif command -v docker-compose >/dev/null 2>&1; then echo docker-compose; \
+             else echo 'docker compose / docker-compose not installed on host' >&2; \
+             echo false; fi) ps"
+        );
+    }
+
+    #[test]
+    fn test_compose_remote_off_constant() {
+        assert_eq!(
+            COMPOSE_REMOTE_OFF,
+            "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false "
+        );
+    }
+
+    #[test]
+    fn test_compose_remote_loaders_are_off_for_every_compose_program() {
+        for bin in [
+            Some("docker compose"),
+            Some("podman compose"),
+            Some("docker-compose"),
+            Some("podman-compose"),
+            Some("/usr/local/bin/docker-compose"),
+            Some("echo pwned; rm -rf /"),
+            None,
+        ] {
+            let cmd = DockerCommandBuilder::build_compose_command(
+                bin, "config", "/opt/app", None, None, false, false, None,
+            );
+            let (dir, rest) = cmd.split_once(" && ").unwrap();
+            assert_eq!(dir, "cd -- '/opt/app'", "{bin:?}");
+            assert!(
+                rest.starts_with(
+                    "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+                     COMPOSE_EXPERIMENTAL_OCI_REMOTE=false "
+                ),
+                "{bin:?}: {cmd}"
+            );
+        }
     }
 
     #[test]
@@ -1193,7 +1337,11 @@ mod tests {
             false,
             None,
         );
-        assert!(cmd.starts_with("cd -- '-x' && "), "{cmd}");
+        assert_eq!(
+            cmd,
+            "cd -- '-x' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+             COMPOSE_EXPERIMENTAL_OCI_REMOTE=false docker compose ps"
+        );
     }
 
     #[test]
@@ -1267,6 +1415,143 @@ mod tests {
                 docker_compose_detect_prefix(Some(bin)).contains("docker compose version"),
                 "{bin}"
             );
+        }
+    }
+
+    // ── validate_compose_path ───────────────────────────────────────
+
+    #[test]
+    fn compose_path_accepts_local_paths() {
+        for ok in [
+            "docker-compose.yml",
+            "compose.prod.yaml",
+            "/opt/app/docker-compose.yml",
+            "./deploy/compose.yml",
+            "../stacks/app_1/compose.yml",
+            "/srv/github.com/x/y/compose.yml",
+            "..",
+        ] {
+            assert!(
+                DockerCommandBuilder::validate_compose_path("file", ok).is_ok(),
+                "{ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_path_refuses_remote_resources_and_stdin() {
+        for bad in [
+            "https://example.com/org/repo.git",
+            "http://example.com/compose.yml",
+            "git://example.com/org/repo.git",
+            "ssh://git@example.com/org/repo.git",
+            "git@example.com:org/repo.git",
+            "oci://registry.example.com/stack:latest",
+            "example.com:compose.yml",
+            "user@example.com/compose.yml",
+            "https://example.com/org/repo.git#main:sub",
+            "/opt/app/compose.yml:/etc/other.yml",
+            "-",
+            "-f",
+            "--file=x",
+            "",
+        ] {
+            let err = DockerCommandBuilder::validate_compose_path("file", bad).unwrap_err();
+            let BridgeError::CommandDenied { reason } = &err else {
+                panic!("{bad:?}: {err:?}");
+            };
+            assert!(
+                reason.contains("'file' must be a path on the target host"),
+                "{bad:?}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_path_refuses_other_characters() {
+        for bad in [
+            "my dir/compose.yml",
+            "compose.yml;id",
+            "$(id).yml",
+            "a'b.yml",
+            "a\\b.yml",
+            "a\nb.yml",
+            "~/compose.yml",
+            "compose+x.yml",
+            "a\u{e9}b.yml",
+        ] {
+            assert!(
+                DockerCommandBuilder::validate_compose_path("file", bad).is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_path_relative_with_a_directory_needs_a_dot_prefix() {
+        for bad in [
+            "github.com/org/repo",
+            "github.com/org/repo.git",
+            "GitHub.com/org/repo",
+            "example.com/org/repo.git",
+            "deploy/compose.yml",
+        ] {
+            let err = DockerCommandBuilder::validate_compose_path("file", bad).unwrap_err();
+            let BridgeError::CommandDenied { reason } = &err else {
+                panic!("{bad:?}: {err:?}");
+            };
+            assert!(reason.contains("leading './'"), "{bad:?}: {reason}");
+            assert!(
+                reason.contains("may read 'github.com/...' as a Git reference, depending on its"),
+                "{bad:?}: {reason}"
+            );
+        }
+        assert!(
+            DockerCommandBuilder::validate_compose_path("file", "./github.com/org/repo").is_ok()
+        );
+    }
+
+    #[test]
+    fn compose_path_message_names_the_argument() {
+        let err =
+            DockerCommandBuilder::validate_compose_path("project_file", "oci://x").unwrap_err();
+        assert!(err.to_string().contains("'project_file'"), "{err}");
+    }
+
+    #[test]
+    fn compose_file_golden_strings_carry_the_remote_loader_switches() {
+        for (file, want) in [
+            (
+                "docker-compose.prod.yml",
+                "cd -- '/opt/app' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+                 COMPOSE_EXPERIMENTAL_OCI_REMOTE=false docker compose \
+                 -f 'docker-compose.prod.yml' up",
+            ),
+            (
+                "/etc/stacks/app.yml",
+                "cd -- '/opt/app' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+                 COMPOSE_EXPERIMENTAL_OCI_REMOTE=false docker compose \
+                 -f '/etc/stacks/app.yml' up",
+            ),
+            (
+                "./deploy/compose.yml",
+                "cd -- '/opt/app' && COMPOSE_EXPERIMENTAL_GIT_REMOTE=false \
+                 COMPOSE_EXPERIMENTAL_OCI_REMOTE=false docker compose \
+                 -f './deploy/compose.yml' up",
+            ),
+        ] {
+            assert!(DockerCommandBuilder::validate_compose_path("file", file).is_ok());
+            let cmd = DockerCommandBuilder::build_compose_command(
+                Some("docker compose"),
+                "up",
+                "/opt/app",
+                Some(file),
+                None,
+                false,
+                false,
+                None,
+            );
+            assert_eq!(cmd, want);
         }
     }
 }

@@ -1,6 +1,11 @@
 //! Handler for the `ssh_aws_cli` tool.
 //!
-//! Executes AWS CLI commands on a remote host.
+//! Executes AWS CLI commands on a remote host, with the AWS identity of that
+//! host (environment, `~/.aws`, instance role). The endpoint and the
+//! credentials are never chosen by the caller: `args` takes an allow-list of
+//! options, the services and operations that print or issue a credential are
+//! refused, and the tool neither reads nor writes files of the host (a word
+//! that is not an option must be an `s3://` location).
 
 use serde::Deserialize;
 
@@ -19,7 +24,8 @@ pub struct SshAwsCliArgs {
     service: String,
     /// AWS CLI subcommand (e.g. describe-instances, list-buckets).
     subcommand: String,
-    /// Additional arguments to pass to the AWS CLI command.
+    /// Additional arguments: whitespace-separated words, quotes group. Options
+    /// come from an allow-list, spelled in full.
     #[serde(default)]
     args: Option<String>,
     /// Override default command timeout in seconds.
@@ -44,13 +50,27 @@ impl StandardTool for AwsCliTool {
     const NAME: &'static str = "ssh_aws_cli";
 
     const DESCRIPTION: &'static str = "Execute AWS CLI commands on a remote host. Runs \
-        'aws SERVICE SUBCOMMAND [ARGS] --output json' via SSH — the --output json flag is \
-        appended automatically; do NOT pass --output in args or jq_filter will fail on \
-        non-JSON text output. Use this only when no specialized tool covers the operation: \
-        for read-only instance metadata use ssh_cloud_metadata or ssh_cloud_tags, for cost \
-        data use ssh_cloud_cost (AWS only), and for multi-cloud instance listing or \
-        comparison across AWS, GCP, and Azure prefer ssh_multicloud_list or \
-        ssh_multicloud_compare.";
+        'aws SERVICE SUBCOMMAND [ARGS] --output json' via SSH with the AWS identity and the \
+        endpoint configured on that host — the --output json flag is appended automatically; \
+        do NOT pass --output in args or jq_filter will fail on non-JSON text output. ARGS is \
+        split into words (quotes group); options must be written in full and come from a \
+        fixed list of resource selectors and paging options (--region, --query, --filters, \
+        --instance-ids, --bucket, --prefix, --max-items, --no-paginate, ...; a refused call \
+        lists them all). Options that choose the endpoint, profile, certificate checks or \
+        request signing (--endpoint-url, --profile, --ca-bundle, --no-verify-ssl, \
+        --no-sign-request, --debug, ...) and parameter values read from a file or URL \
+        (file://, http://) are refused, as are the services configure, sso, sso-oidc, login, \
+        logout and history and the operations that print or issue a credential (sts \
+        get-session-token and assume-role, ecr get-login-password, eks get-token, s3 \
+        presign, iam create-access-key, rds generate-db-auth-token, ...). The tool does not \
+        read or write files of the host: a word of ARGS that is not an option or the value \
+        of one must be an s3:// location (s3 cp and mv work between buckets), and the \
+        operations that write an output file (s3api get-object, lambda invoke, ...) are \
+        refused; use ssh_exec for transfers to or from the host. Use this only when \
+        no specialized tool covers the operation: for read-only instance metadata use \
+        ssh_cloud_metadata or ssh_cloud_tags, for cost data use ssh_cloud_cost (AWS only), \
+        and for multi-cloud instance listing or comparison across AWS, GCP, and Azure prefer \
+        ssh_multicloud_list or ssh_multicloud_compare.";
 
     const SCHEMA: &'static str = r#"{
                 "type": "object",
@@ -69,7 +89,7 @@ impl StandardTool for AwsCliTool {
                     },
                     "args": {
                         "type": "string",
-                        "description": "Additional arguments (e.g. '--region us-east-1 --instance-ids i-123'). Do NOT include --output here; --output json is appended automatically and overriding it will break jq_filter."
+                        "description": "Additional arguments, split into words (quotes group), e.g. '--region us-east-1 --instance-ids i-123' or \"--query 'Reservations[].Instances[].InstanceId'\". Options must be written in full and come from a fixed list of resource selectors and paging options; options that choose the endpoint, profile, certificate checks or request signing are refused. A word that is not an option or the value of one must be an s3:// location: files of the host are never read or written (use ssh_exec for transfers). Do NOT include --output here; --output json is appended automatically and overriding it will break jq_filter."
                     },
                     "timeout_seconds": {
                         "type": "integer",
@@ -94,6 +114,10 @@ impl StandardTool for AwsCliTool {
     fn validate(args: &SshAwsCliArgs, _host_config: &HostConfig) -> Result<()> {
         CloudCommandBuilder::validate_aws_service(&args.service)?;
         CloudCommandBuilder::validate_subcommand(&args.subcommand)?;
+        CloudCommandBuilder::validate_aws_operation(&args.service, &args.subcommand)?;
+        if let Some(extra) = args.args.as_deref() {
+            CloudCommandBuilder::validate_aws_args(extra)?;
+        }
         Ok(())
     }
 
@@ -359,5 +383,247 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error.is_none() || result.is_error == Some(false));
+    }
+
+    // ============== The host's identity and endpoint stay the host's ==============
+
+    fn host_config() -> crate::config::HostConfig {
+        server1_hosts().remove("server1").expect("server1")
+    }
+
+    fn call_args(service: &str, subcommand: &str, extra: Option<&str>) -> SshAwsCliArgs {
+        let mut value = json!({"host": "server1", "service": service, "subcommand": subcommand});
+        if let (Some(map), Some(extra)) = (value.as_object_mut(), extra) {
+            map.insert("args".to_string(), json!(extra));
+        }
+        serde_json::from_value(value).expect("deserialize")
+    }
+
+    fn command_for(service: &str, subcommand: &str, extra: Option<&str>) -> String {
+        let args = call_args(service, subcommand, extra);
+        AwsCliTool::validate(&args, &host_config())
+            .unwrap_or_else(|e| panic!("{service} {subcommand} {extra:?}: {e:?}"));
+        AwsCliTool::build_command(&args, &host_config()).unwrap()
+    }
+
+    fn refusal_for(service: &str, subcommand: &str, extra: Option<&str>) -> String {
+        let args = call_args(service, subcommand, extra);
+        match AwsCliTool::validate(&args, &host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => reason,
+            other => panic!("{service} {subcommand} {extra:?}: expected CommandDenied: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_command_strings() {
+        assert_eq!(
+            command_for("s3", "ls", None),
+            "aws 's3' 'ls' --output json 2>&1"
+        );
+        assert_eq!(
+            command_for(
+                "ec2",
+                "describe-instances",
+                Some("--region us-east-1 --instance-ids i-123")
+            ),
+            "aws 'ec2' 'describe-instances' '--region' 'us-east-1' '--instance-ids' 'i-123' \
+             --output json 2>&1"
+        );
+        assert_eq!(
+            command_for("sts", "get-caller-identity", Some("--query Account")),
+            "aws 'sts' 'get-caller-identity' '--query' 'Account' --output json 2>&1"
+        );
+    }
+
+    #[test]
+    fn test_refuses_the_options_that_choose_the_destination_or_the_credentials() {
+        for extra in [
+            "--endpoint-url=http://rogue.example",
+            "--endpoint-url http://rogue.example",
+            "--endpoint=http://rogue.example",
+            "--end=http://rogue.example",
+            "--profile other",
+            "--prof=other",
+            "--ca-bundle /tmp/ca.pem",
+            "--no-verify-ssl",
+            "--no-sign-request",
+            "--debug",
+            "--region us-east-1 --endpoint-url=http://rogue.example",
+        ] {
+            let reason = refusal_for("ec2", "describe-instances", Some(extra));
+            assert!(reason.contains("'args'"), "{extra}: {reason}");
+            assert!(reason.contains("global option"), "{extra}: {reason}");
+        }
+    }
+
+    #[test]
+    fn test_s3_locations_are_accepted_and_quoted_one_word_each() {
+        assert_eq!(
+            command_for("s3", "ls", Some("s3://b/")),
+            "aws 's3' 'ls' 's3://b/' --output json 2>&1"
+        );
+        assert_eq!(
+            command_for("s3", "cp", Some("s3://a/k s3://b/k")),
+            "aws 's3' 'cp' 's3://a/k' 's3://b/k' --output json 2>&1"
+        );
+        assert_eq!(
+            command_for("s3", "rm", Some("--recursive s3://b/p/")),
+            "aws 's3' 'rm' '--recursive' 's3://b/p/' --output json 2>&1"
+        );
+        assert_eq!(
+            command_for(
+                "s3",
+                "ls",
+                Some("--recursive --human-readable --summarize s3://b")
+            ),
+            "aws 's3' 'ls' '--recursive' '--human-readable' '--summarize' 's3://b' \
+             --output json 2>&1"
+        );
+    }
+
+    #[test]
+    fn test_refuses_the_files_of_the_host() {
+        for (service, subcommand, extra) in [
+            ("s3", "cp", "/srv/x s3://b/k"),
+            ("s3", "cp", "s3://b/k /srv/x"),
+            ("s3", "cp", "--recursive /srv/d s3://b/"),
+            ("s3", "mv", "s3://b/k /srv/x"),
+            ("s3", "sync", "s3://b/ /srv/d"),
+        ] {
+            let reason = refusal_for(service, subcommand, Some(extra));
+            assert!(reason.starts_with("'args'"), "{extra}: {reason}");
+            assert!(
+                reason.contains("does not read or write files of the host"),
+                "{extra}: {reason}"
+            );
+            assert!(reason.contains("ssh_exec"), "{extra}: {reason}");
+        }
+        // The operations that write the `outfile` positional are refused
+        // whatever the arguments.
+        for (service, subcommand, extra) in [
+            ("s3api", "get-object", "--bucket b --key k /srv/x"),
+            ("s3api", "get-object", "--bucket b --key k"),
+            ("s3api", "get-object-torrent", "--bucket b --key k /srv/x"),
+            ("lambda", "invoke", "--function-name f /srv/out"),
+            ("cloudfront", "get-function", "--name f /srv/out"),
+            ("iotwireless", "get-position-estimate", "/srv/out"),
+            ("apigateway", "get-api-keys", ""),
+            ("apigateway", "get-api-keys", "--include"),
+            ("apigateway", "get-api-key", "--include"),
+        ] {
+            let reason = refusal_for(service, subcommand, Some(extra));
+            assert!(
+                reason.contains("'subcommand'"),
+                "{service} {subcommand}: {reason}"
+            );
+            assert!(
+                reason.contains("ssh_exec"),
+                "{service} {subcommand}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_refuses_the_identity_services_and_the_credential_operations() {
+        for service in ["configure", "sso", "sso-oidc", "login", "logout", "history"] {
+            let reason = refusal_for(service, "get", None);
+            assert!(reason.contains("'service'"), "{service}: {reason}");
+        }
+        for (service, subcommand) in [
+            ("sts", "get-session-token"),
+            ("sts", "get-federation-token"),
+            ("sts", "assume-role"),
+            ("ecr", "get-login-password"),
+            ("ecr-public", "get-login-password"),
+            ("codeartifact", "get-authorization-token"),
+            ("eks", "get-token"),
+            ("iam", "create-access-key"),
+            ("s3", "presign"),
+            ("rds", "generate-db-auth-token"),
+        ] {
+            let reason = refusal_for(service, subcommand, None);
+            assert!(
+                reason.contains("'subcommand'"),
+                "{service} {subcommand}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_refuses_parameters_loaded_from_a_file_or_a_url() {
+        for extra in [
+            "--instance-ids file:///srv/x",
+            "--name fileb:///srv/x",
+            "--name http://198.51.100.7/x",
+        ] {
+            let reason = refusal_for("ec2", "describe-instances", Some(extra));
+            assert!(reason.contains("file://"), "{extra}: {reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_refused_call_sends_no_command() {
+        let handler = SshAwsCliHandler::new();
+        let ctx = permissive_ctx(mock_output("mock output"));
+        for call in [
+            json!({"host": "server1", "service": "ec2", "subcommand": "describe-instances",
+                   "args": "--end=http://rogue.example"}),
+            json!({"host": "server1", "service": "s3", "subcommand": "cp",
+                   "args": "s3://b/k /srv/x"}),
+            json!({"host": "server1", "service": "lambda", "subcommand": "invoke",
+                   "args": "--function-name f /srv/out"}),
+            json!({"host": "server1", "service": "configure", "subcommand": "get"}),
+            json!({"host": "server1", "service": "eks", "subcommand": "get-token"}),
+        ] {
+            let result = handler.execute(Some(call.clone()), &ctx).await;
+            assert!(
+                matches!(result, Err(BridgeError::CommandDenied { .. })),
+                "{call}: {result:?}"
+            );
+        }
+        let calls = ctx.connection_pool.mock_calls();
+        assert!(calls.is_empty(), "a refused call sent {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn test_an_allowed_call_runs_with_one_quoted_word_per_argument() {
+        let handler = SshAwsCliHandler::new();
+        let ctx = permissive_ctx(mock_output("{}"));
+        handler
+            .execute(
+                Some(json!({"host": "server1", "service": "ec2",
+                            "subcommand": "describe-instances",
+                            "args": "--region us-east-1 --query 'Reservations[0]'"})),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let calls = ctx.connection_pool.mock_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].0,
+            "export LC_ALL=C; aws 'ec2' 'describe-instances' '--region' 'us-east-1' \
+             '--query' 'Reservations[0]' --output json 2>&1"
+        );
+    }
+
+    #[test]
+    fn test_description_and_schema_state_the_rule() {
+        let handler = SshAwsCliHandler::new();
+        let description = handler.description();
+        for needle in [
+            "AWS identity",
+            "--endpoint-url",
+            "configure",
+            "get-session-token",
+        ] {
+            assert!(description.contains(needle), "{needle}");
+        }
+        let schema = handler.schema();
+        let schema_json: serde_json::Value = serde_json::from_str(schema.input_schema).unwrap();
+        let args_doc = schema_json["properties"]["args"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(args_doc.contains("fixed list"), "{args_doc}");
     }
 }

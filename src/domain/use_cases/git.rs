@@ -2,6 +2,29 @@
 //!
 //! Builds Git CLI commands for remote execution via SSH.
 //! Uses `git -C {path}` to operate on repositories at specific paths.
+//!
+//! # Ambient credentials
+//!
+//! `git clone` (the URL) and `git pull` (the remote) connect to a server
+//! chosen by the caller, from a client that runs as the SSH user of the target
+//! host. The credential sources that git keys by host stay in place: a
+//! credential helper (`store`, `cache`, `libsecret`, a manager), a `~/.netrc`
+//! `machine` entry and an `http.<url>.extraHeader` are only presented to the
+//! server they name. Two sources that git applies to every server are hidden
+//! on every command that contacts a server: an unscoped `http.extraHeader`
+//! (cleared by `-c http.extraHeader=`) and the TLS client certificate
+//! variables `GIT_SSL_CERT`, `GIT_SSL_KEY` and `GIT_SSL_CERT_PASSWORD_PROTECTED`
+//! (dropped from the environment of the command, see
+//! `GIT_SSL_CLIENT_CERT_UNSET`).
+//!
+//! What is left to the configuration of the host, and is not hidden: an
+//! unscoped `http.sslCert` / `http.sslKey` in the git configuration (git has
+//! no per-command reset for them: an empty `-c http.sslCert=` makes git
+//! abort), a credential helper that answers for any host, a `~/.netrc`
+//! `default` entry, `core.sshCommand`, `GIT_SSH_COMMAND` and the `ssh`
+//! configuration (`ForwardAgent`, `StrictHostKeyChecking`, `IdentityFile`
+//! under `Host *`). Keep those host-keyed, or absent, on the hosts that this
+//! tool is allowed to reach.
 
 use std::fmt::Write;
 
@@ -10,6 +33,49 @@ use crate::error::{BridgeError, Result};
 
 fn shell_escape(s: &str) -> String {
     super::shell::escape(s, ShellType::Posix)
+}
+
+/// Top-level `git` option that empties the list of `http.extraHeader` values
+/// inherited from the configuration files (an empty value resets the list,
+/// see `git-config(1)`). Without it an unscoped header of the host's
+/// `~/.gitconfig` or `/etc/gitconfig` (typically `Authorization: ...`) is sent
+/// to whichever server the caller names. A header scoped to a URL
+/// (`http.<url>.extraHeader`) is host-keyed and is not affected when it
+/// matches the server; see the residual note in `SECURITY.md`.
+///
+/// It is a top-level option (before the subcommand), so it also applies to
+/// the `git fetch` that `git pull` runs and to the transport of `git clone`,
+/// and it is not written to the configuration of the cloned repository (unlike
+/// `git clone --config`).
+const GIT_NO_EXTRA_HEADER: &str = "-c http.extraHeader=";
+
+/// Shell prefix of a `git` that connects to a server the caller chose: drops
+/// the environment variables that make git present a TLS client certificate
+/// of the SSH host (`GIT_SSL_CERT`, `GIT_SSL_KEY`, and
+/// `GIT_SSL_CERT_PASSWORD_PROTECTED` that goes with them; they override
+/// `http.sslCert`, `http.sslKey` and `http.sslCertPasswordProtected`, see
+/// `git-config(1)`), so that nothing of the host is presented to that server.
+/// `unset` is a POSIX builtin; the command runs in the SSH user's shell, so
+/// nothing outlives it. It is joined with `&&`, not `;`: `unset` of a
+/// `readonly` variable fails, and git must not start then (a surviving
+/// variable would be presented to the server). `unset` of a variable that is
+/// not set succeeds.
+///
+/// It does not cover an unscoped `http.sslCert` / `http.sslKey` in the git
+/// configuration, which has no per-command reset (see the module
+/// documentation).
+const GIT_SSL_CLIENT_CERT_UNSET: &str =
+    "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && ";
+
+/// Whether `name` can be the name of a configured remote as this tool
+/// accepts it: ASCII letters, digits, `.`, `-` and `_`, not starting with `.`
+/// or `-`. A URL (`:`, `//`, `@`) and a path (`/`, `\`) fall outside it.
+fn is_remote_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '.'])
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
 /// Builds Git CLI commands for remote execution.
@@ -102,6 +168,13 @@ impl GitCommandBuilder {
     ///
     /// Fetches and integrates remote changes. Supports `--rebase`
     /// and `--ff-only` flags, optional remote and branch.
+    ///
+    /// The command starts with the `unset` of `GIT_SSL_CLIENT_CERT_UNSET` and
+    /// git runs with `-c http.extraHeader=`. The remote and the branch come
+    /// after `--`; `git pull` reads its first positional argument as the
+    /// repository, so a `branch` without a `remote` is not emitted
+    /// ([`validate_pull_target`](Self::validate_pull_target) refuses that
+    /// combination before any command is built).
     #[must_use]
     pub fn build_pull_command(
         path: &str,
@@ -111,7 +184,8 @@ impl GitCommandBuilder {
         ff_only: bool,
     ) -> String {
         let escaped_path = shell_escape(path);
-        let mut cmd = format!("git -C {escaped_path} pull");
+        let mut cmd =
+            format!("{GIT_SSL_CLIENT_CERT_UNSET}git -C {escaped_path} {GIT_NO_EXTRA_HEADER} pull");
 
         if rebase {
             cmd.push_str(" --rebase");
@@ -120,10 +194,10 @@ impl GitCommandBuilder {
             cmd.push_str(" --ff-only");
         }
         if let Some(r) = remote {
-            let _ = write!(cmd, " {}", shell_escape(r));
-        }
-        if let Some(b) = branch {
-            let _ = write!(cmd, " {}", shell_escape(b));
+            let _ = write!(cmd, " -- {}", shell_escape(r));
+            if let Some(b) = branch {
+                let _ = write!(cmd, " {}", shell_escape(b));
+            }
         }
 
         cmd
@@ -133,6 +207,11 @@ impl GitCommandBuilder {
     ///
     /// Clones a repository from the given URL. Supports shallow clones
     /// via `depth`, branch selection, and `single_branch`.
+    ///
+    /// The command starts with the `unset` of `GIT_SSL_CLIENT_CERT_UNSET` and
+    /// git runs with `-c http.extraHeader=`: the URL is the caller's choice, so neither a
+    /// header nor a client certificate that the host applies to every server
+    /// is sent to it.
     #[must_use]
     pub fn build_clone_command(
         url: &str,
@@ -141,7 +220,7 @@ impl GitCommandBuilder {
         depth: Option<u32>,
         single_branch: bool,
     ) -> String {
-        let mut cmd = String::from("git clone");
+        let mut cmd = format!("{GIT_SSL_CLIENT_CERT_UNSET}git {GIT_NO_EXTRA_HEADER} clone");
 
         if let Some(b) = branch {
             let _ = write!(cmd, " --branch {}", shell_escape(b));
@@ -227,6 +306,40 @@ impl GitCommandBuilder {
     /// with `-`.
     pub fn validate_not_option(arg: &str, value: Option<&str>) -> Result<()> {
         value.map_or(Ok(()), |v| super::shell::refuse_option_like(arg, v))
+    }
+
+    /// Validate the `remote` and `branch` of a `git pull`.
+    ///
+    /// - `remote` must be the name of a remote configured in the repository:
+    ///   ASCII letters, digits, `.`, `-` and `_`, not starting with `.` or
+    ///   `-`. `git pull` takes any URL or path in its place and would contact
+    ///   that server as the SSH user of the host, so neither is accepted.
+    /// - `branch` must not start with `-`, and needs a `remote`: without one,
+    ///   `git pull` reads the branch as the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::CommandDenied`] naming the argument.
+    pub fn validate_pull_target(remote: Option<&str>, branch: Option<&str>) -> Result<()> {
+        if let Some(r) = remote
+            && !is_remote_name(r)
+        {
+            return Err(BridgeError::CommandDenied {
+                reason: "'remote' must be the name of a remote configured in the repository: \
+                         ASCII letters, digits and . - _ only, not starting with '.' or '-' \
+                         (a URL or a path is not accepted; use ssh_git_clone for a URL)"
+                    .to_string(),
+            });
+        }
+        Self::validate_not_option("branch", branch)?;
+        if branch.is_some() && remote.is_none() {
+            return Err(BridgeError::CommandDenied {
+                reason: "'branch' needs 'remote': without a remote name, git reads the branch \
+                         as the repository to pull from"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Validate a branch action.
@@ -452,19 +565,31 @@ mod tests {
     #[test]
     fn test_pull_basic() {
         let cmd = GitCommandBuilder::build_pull_command("/opt/repo", None, None, false, false);
-        assert_eq!(cmd, "git -C '/opt/repo' pull");
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull"
+        );
     }
 
     #[test]
     fn test_pull_rebase() {
         let cmd = GitCommandBuilder::build_pull_command("/opt/repo", None, None, true, false);
-        assert_eq!(cmd, "git -C '/opt/repo' pull --rebase");
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull --rebase"
+        );
     }
 
     #[test]
     fn test_pull_ff_only() {
         let cmd = GitCommandBuilder::build_pull_command("/opt/repo", None, None, false, true);
-        assert_eq!(cmd, "git -C '/opt/repo' pull --ff-only");
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull --ff-only"
+        );
     }
 
     #[test]
@@ -476,7 +601,11 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(cmd, "git -C '/opt/repo' pull 'origin' 'main'");
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull -- 'origin' 'main'"
+        );
     }
 
     #[test]
@@ -488,10 +617,12 @@ mod tests {
             true,
             true,
         );
-        assert!(cmd.contains("--rebase"));
-        assert!(cmd.contains("--ff-only"));
-        assert!(cmd.contains("'upstream'"));
-        assert!(cmd.contains("'develop'"));
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull --rebase --ff-only \
+             -- 'upstream' 'develop'"
+        );
     }
 
     #[test]
@@ -503,7 +634,127 @@ mod tests {
             false,
             false,
         );
-        assert!(cmd.contains("'origin; echo pwned'"));
+        assert!(cmd.contains("-- 'origin; echo pwned'"));
+    }
+
+    #[test]
+    fn test_pull_remote_only() {
+        let cmd =
+            GitCommandBuilder::build_pull_command("/opt/repo", Some("origin"), None, false, false);
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull -- 'origin'"
+        );
+    }
+
+    #[test]
+    fn test_pull_never_emits_a_branch_without_a_remote() {
+        // `git pull <x>` reads <x> as the repository.
+        let cmd = GitCommandBuilder::build_pull_command(
+            "/opt/repo",
+            None,
+            Some("https://rogue.example/r.git"),
+            true,
+            false,
+        );
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull --rebase"
+        );
+    }
+
+    #[test]
+    fn test_pull_clears_the_unscoped_extra_header_before_the_subcommand() {
+        let cmd = GitCommandBuilder::build_pull_command("/opt/repo", None, None, false, false);
+        let header = cmd.find("-c http.extraHeader=").expect("header reset");
+        assert!(header < cmd.find(" pull").expect("subcommand"), "{cmd}");
+    }
+
+    #[test]
+    fn test_pull_drops_the_client_certificate_variables_before_git_starts() {
+        for (remote, branch) in [(None, None), (Some("origin"), Some("main"))] {
+            let cmd =
+                GitCommandBuilder::build_pull_command("/opt/repo", remote, branch, true, true);
+            assert!(
+                cmd.starts_with(
+                    "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && git -C "
+                ),
+                "{cmd}"
+            );
+        }
+    }
+
+    // ── validate_pull_target ───────────────────────────────────────
+
+    #[test]
+    fn test_validate_pull_target_accepts_remote_names() {
+        for remote in [
+            "origin",
+            "upstream",
+            "my-remote",
+            "my_remote",
+            "r.1",
+            "a..b",
+            "O1",
+        ] {
+            GitCommandBuilder::validate_pull_target(Some(remote), Some("feature/x")).expect(remote);
+            GitCommandBuilder::validate_pull_target(Some(remote), None).expect(remote);
+        }
+        GitCommandBuilder::validate_pull_target(None, None).expect("no remote, no branch");
+    }
+
+    #[test]
+    fn test_validate_pull_target_refuses_urls_paths_and_odd_names() {
+        for remote in [
+            "https://rogue.example/r.git",
+            "http://127.0.0.1:8080/x",
+            "git@rogue.example:o/r.git",
+            "rogue.example:o/r.git",
+            "ssh://rogue.example/r",
+            "user:pw@rogue.example",
+            "host::addr",
+            "ext::sh -c x",
+            "/srv/repo",
+            "../repo",
+            "./repo",
+            ".hidden",
+            "..",
+            "dir/remote",
+            "C:\\repo",
+            "\\\\server\\share",
+            "with space",
+            "semi;colon",
+            "dollar$x",
+            "new\nline",
+            "--upload-pack=x",
+            "-o",
+            "",
+            "é",
+        ] {
+            let err =
+                GitCommandBuilder::validate_pull_target(Some(remote), None).expect_err(remote);
+            let msg = err.to_string();
+            assert!(msg.contains("'remote'"), "{msg}");
+            assert!(msg.contains("configured in the repository"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn test_validate_pull_target_refuses_a_branch_without_remote() {
+        let err = GitCommandBuilder::validate_pull_target(None, Some("main")).unwrap_err();
+        assert!(err.to_string().contains("'branch' needs 'remote'"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_pull_target_refuses_an_option_shaped_branch() {
+        let err = GitCommandBuilder::validate_pull_target(Some("origin"), Some("--output=/x"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("'branch' must not start with '-'"),
+            "{err}"
+        );
     }
 
     // ── build_clone_command ────────────────────────────────────────
@@ -517,7 +768,11 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(cmd, "git clone -- 'https://github.com/user/repo.git'");
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -c http.extraHeader= clone -- 'https://github.com/user/repo.git'"
+        );
     }
 
     #[test]
@@ -578,11 +833,76 @@ mod tests {
             Some(5),
             true,
         );
-        assert!(cmd.contains("git clone --branch 'main'"));
-        assert!(cmd.contains("-- 'https://github.com/user/repo.git'"));
-        assert!(cmd.contains("--depth 5"));
-        assert!(cmd.contains("--single-branch"));
-        assert!(cmd.contains("'/opt/dest'"));
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -c http.extraHeader= clone --branch 'main' --depth 5 --single-branch \
+             -- 'https://github.com/user/repo.git' '/opt/dest'"
+        );
+    }
+
+    #[test]
+    fn test_clone_clears_the_unscoped_extra_header_before_the_subcommand() {
+        let cmd = GitCommandBuilder::build_clone_command("ssh://x/y", None, None, None, false);
+        assert!(
+            cmd.starts_with(
+                "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+                 git -c http.extraHeader= clone "
+            ),
+            "{cmd}"
+        );
+    }
+
+    #[test]
+    fn test_clone_drops_the_client_certificate_variables_before_git_starts() {
+        let cmd = GitCommandBuilder::build_clone_command(
+            "https://git.example.org/o/r.git",
+            Some("/srv/x"),
+            Some("main"),
+            Some(1),
+            true,
+        );
+        assert!(cmd.starts_with("unset "), "{cmd}");
+        // Joined with `&&` so that a `readonly` variable stops the command.
+        assert!(
+            cmd.find(" && git ").expect("and-list") < cmd.find(" clone ").expect("subcommand"),
+            "{cmd}"
+        );
+        assert!(!cmd.contains(';'), "{cmd}");
+    }
+
+    #[test]
+    fn test_git_commands_that_contact_no_server_are_unchanged() {
+        // Only the commands that connect to a server chosen by the caller get
+        // the prefix.
+        assert_eq!(
+            GitCommandBuilder::build_status_command("/srv/x", false),
+            "git -C '/srv/x' status"
+        );
+        assert_eq!(
+            GitCommandBuilder::build_log_command("/srv/x", None, false, None, None, None, None),
+            "git -C '/srv/x' log"
+        );
+        assert_eq!(
+            GitCommandBuilder::build_diff_command("/srv/x", false, None, None),
+            "git -C '/srv/x' diff"
+        );
+    }
+
+    #[test]
+    fn test_clone_keeps_the_credential_helper_and_ssh_command() {
+        // Host-keyed helpers must keep working, and a custom ssh setup is the
+        // host's business: nothing here overrides either.
+        let cmd = GitCommandBuilder::build_clone_command(
+            "https://u:p@example.org/r.git",
+            Some("/opt/d"),
+            Some("main"),
+            Some(1),
+            true,
+        );
+        for forbidden in ["credential", "sshCommand", "GIT_SSH", "GIT_CONFIG"] {
+            assert!(!cmd.contains(forbidden), "{cmd}");
+        }
     }
 
     #[test]
@@ -715,7 +1035,8 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            "git clone -- 'ssh://x/y' '--config=core.sshCommand=touch /tmp/p'"
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -c http.extraHeader= clone -- 'ssh://x/y' '--config=core.sshCommand=touch /tmp/p'"
         );
     }
 

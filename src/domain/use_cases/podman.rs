@@ -342,14 +342,40 @@ impl PodmanCommandBuilder {
         Ok(())
     }
 
+    /// Validate the `file` argument of a compose command: a path on the
+    /// target host, never a remote resource.
+    ///
+    /// The compose provider behind `podman compose` (`docker-compose` or
+    /// `podman-compose`) reads URLs, Git and OCI references and `host:path`
+    /// forms in place of a file. See [`validate_compose_path`] for the rule.
+    ///
+    /// [`validate_compose_path`]: super::docker::DockerCommandBuilder::validate_compose_path
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::CommandDenied`] naming `file` when it is not a
+    /// local path.
+    pub fn validate_compose_file(file: &str) -> Result<()> {
+        super::docker::DockerCommandBuilder::validate_compose_path("file", file)
+    }
+
     /// Build a `podman-compose` or `podman compose` command.
+    ///
+    /// The command starts with the compose remote-loader switches
+    /// (`COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false`,
+    /// shell prefix assignments for the one command): `podman compose` hands
+    /// its environment to the compose provider, and a provider that is Docker
+    /// Compose would otherwise load a Git or OCI resource named by an
+    /// `include:` in a compose file already on the host, with the host's own
+    /// credential sources. See `COMPOSE_REMOTE_OFF` in the docker module.
     ///
     /// Every word of `action` is quoted on its own, so `up -d` keeps working
     /// and `ps; id` stays one inert word. Quoting does not stop a word from
-    /// being read as an option: run `validate_compose_action` first.
+    /// being read as an option: run `validate_compose_action` first, and
+    /// `validate_compose_file` on `file`.
     #[must_use]
     pub fn build_compose_command(action: &str, file: Option<&str>) -> String {
-        let mut cmd = String::from("podman compose");
+        let mut cmd = format!("{}podman compose", super::docker::COMPOSE_REMOTE_OFF);
         if let Some(f) = file {
             let _ = write!(cmd, " -f {}", shell_escape(f));
         }
@@ -411,6 +437,11 @@ mod tests {
         assert!(cmd.contains("podman compose"));
         assert!(cmd.contains("-f"));
         assert!(cmd.contains("'up' '-d'"));
+        assert_eq!(
+            cmd,
+            "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false \
+             podman compose -f 'docker-compose.prod.yml' 'up' '-d'"
+        );
     }
 
     #[test]
@@ -422,9 +453,17 @@ mod tests {
     #[test]
     fn test_compose_action_words_are_quoted() {
         let cmd = PodmanCommandBuilder::build_compose_command("ps; id", None);
-        assert_eq!(cmd, "podman compose 'ps;' 'id'");
+        assert_eq!(
+            cmd,
+            "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false \
+             podman compose 'ps;' 'id'"
+        );
         let cmd = PodmanCommandBuilder::build_compose_command("up -d", None);
-        assert_eq!(cmd, "podman compose 'up' '-d'");
+        assert_eq!(
+            cmd,
+            "COMPOSE_EXPERIMENTAL_GIT_REMOTE=false COMPOSE_EXPERIMENTAL_OCI_REMOTE=false \
+             podman compose 'up' '-d'"
+        );
     }
 
     #[test]
@@ -570,6 +609,35 @@ mod tests {
         ] {
             let err = PodmanCommandBuilder::validate_compose_action(bad).unwrap_err();
             assert!(err.to_string().contains("quote"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_validate_compose_file_accepts_local_paths_only() {
+        for ok in [
+            "compose.yaml",
+            "/srv/app/compose.yml",
+            "./a/b.yml",
+            "../b.yml",
+        ] {
+            assert!(
+                PodmanCommandBuilder::validate_compose_file(ok).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in [
+            "https://example.com/org/repo.git",
+            "git@example.com:org/repo.git",
+            "oci://registry.example.com/stack",
+            "example.com:compose.yml",
+            "github.com/org/repo",
+            "-",
+            "",
+            "a b.yml",
+        ] {
+            let err = PodmanCommandBuilder::validate_compose_file(bad).unwrap_err();
+            assert!(matches!(err, BridgeError::CommandDenied { .. }), "{bad:?}");
+            assert!(err.to_string().contains("'file'"), "{bad:?}: {err}");
         }
     }
 }

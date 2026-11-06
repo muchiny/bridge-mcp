@@ -1,7 +1,9 @@
 //! SSH Git Pull Tool Handler
 //!
 //! Pulls latest changes in a Git repository on a remote host
-//! via `git -C {path} pull`.
+//! via `git -C {path} pull`. The remote must be the name of a remote
+//! configured in the repository: a URL or a path would let the caller pick the
+//! server that the host's git talks to.
 
 use serde::Deserialize;
 
@@ -44,7 +46,13 @@ impl StandardTool for GitPullTool {
 
     const DESCRIPTION: &'static str = "Pull latest changes into a Git repository on a remote host. Fetches and integrates \
         remote changes. Supports --rebase and --ff-only flags, optional remote and branch \
-        specification.";
+        specification. The remote must be the name of a remote configured in the \
+        repository (not a URL or a path); a branch needs a remote. An unscoped \
+        http.extraHeader and the GIT_SSL_CERT / GIT_SSL_KEY client certificate variables of \
+        the host are not sent. An unscoped http.sslCert / http.sslKey in the host's git \
+        config, a credential helper that answers for any host and a ~/.netrc default entry \
+        are presented to the remote's URL: operators avoid them on hosts exposed to these \
+        tools.";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -59,11 +67,11 @@ impl StandardTool for GitPullTool {
             },
             "remote": {
                 "type": "string",
-                "description": "Remote name to pull from (default: configured upstream)"
+                "description": "Name of a remote configured in the repository (ASCII letters, digits, '.', '-', '_'; not a URL or a path). Default: the configured upstream"
             },
             "branch": {
                 "type": "string",
-                "description": "Branch name to pull (default: current tracking branch)"
+                "description": "Branch name to pull (requires remote; default: current tracking branch)"
             },
             "rebase": {
                 "type": "boolean",
@@ -93,8 +101,7 @@ impl StandardTool for GitPullTool {
     }"#;
 
     fn validate(args: &SshGitPullArgs, _host_config: &HostConfig) -> Result<()> {
-        GitCommandBuilder::validate_not_option("remote", args.remote.as_deref())?;
-        GitCommandBuilder::validate_not_option("branch", args.branch.as_deref())
+        GitCommandBuilder::validate_pull_target(args.remote.as_deref(), args.branch.as_deref())
     }
 
     fn build_command(args: &SshGitPullArgs, _host_config: &HostConfig) -> Result<String> {
@@ -253,14 +260,38 @@ mod tests {
     }
 
     #[test]
+    fn test_description_states_the_residual_credential_sources() {
+        for needle in ["GIT_SSL_CERT", "http.sslCert", "any host", "~/.netrc"] {
+            assert!(GitPullTool::DESCRIPTION.contains(needle), "{needle}");
+        }
+    }
+
+    #[test]
     fn test_build_command_defaults() {
         let args: SshGitPullArgs =
             serde_json::from_value(json!({"host": "s", "path": "/opt/repo"})).unwrap();
         let host = test_host_config();
         let cmd = GitPullTool::build_command(&args, &host).unwrap();
-        assert_ne!(cmd, "");
-        assert!(cmd.contains("git"));
-        assert!(cmd.contains("pull"));
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull"
+        );
+    }
+
+    #[test]
+    fn test_build_command_remote_and_branch() {
+        let args: SshGitPullArgs = serde_json::from_value(json!({
+            "host": "s", "path": "/opt/repo", "remote": "origin", "branch": "main",
+            "rebase": true, "ff_only": true
+        }))
+        .unwrap();
+        let cmd = GitPullTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(
+            cmd,
+            "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
+             git -C '/opt/repo' -c http.extraHeader= pull --rebase --ff-only -- 'origin' 'main'"
+        );
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {
@@ -377,9 +408,58 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_refuses_a_remote_that_is_not_a_configured_name() {
+        for remote in [
+            "https://rogue.example/r.git",
+            "git@rogue.example:o/r.git",
+            "rogue.example:o/r.git",
+            "/srv/repo",
+            "../repo",
+            "host::addr",
+            "a@b",
+            "a\\b",
+            "",
+        ] {
+            let args: SshGitPullArgs = serde_json::from_value(
+                json!({"host": "s", "path": "/opt/repo", "remote": remote, "branch": "main"}),
+            )
+            .unwrap();
+            let err = GitPullTool::validate(&args, &test_host_config()).unwrap_err();
+            assert!(
+                err.to_string().contains("'remote' must be the name"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_refuses_a_branch_without_remote() {
+        let args: SshGitPullArgs = serde_json::from_value(
+            json!({"host": "s", "path": "/opt/repo", "branch": "https://rogue.example/r.git"}),
+        )
+        .unwrap();
+        let err = GitPullTool::validate(&args, &test_host_config()).unwrap_err();
+        assert!(err.to_string().contains("'branch' needs 'remote'"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_accepts_configured_remote_names() {
+        for remote in ["origin", "upstream", "my-fork", "r_2", "v1.0"] {
+            let args: SshGitPullArgs = serde_json::from_value(
+                json!({"host": "s", "path": "/opt/repo", "remote": remote, "branch": "feature/x"}),
+            )
+            .unwrap();
+            GitPullTool::validate(&args, &test_host_config()).expect(remote);
+        }
+        let args: SshGitPullArgs =
+            serde_json::from_value(json!({"host": "s", "path": "/opt/repo"})).unwrap();
+        GitPullTool::validate(&args, &test_host_config()).expect("no remote");
+    }
+
+    #[test]
     fn test_validate_refuses_option_shaped_remote_and_branch() {
         for key in ["remote", "branch"] {
-            let mut v = json!({"host": "s", "path": "/opt/repo"});
+            let mut v = json!({"host": "s", "path": "/opt/repo", "remote": "origin"});
             v[key] = json!("--upload-pack=touch /tmp/p");
             let args: SshGitPullArgs = serde_json::from_value(v).unwrap();
             let err = GitPullTool::validate(&args, &test_host_config()).unwrap_err();
