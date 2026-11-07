@@ -2522,6 +2522,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         config
@@ -2983,6 +2984,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -3266,6 +3268,7 @@ mod tests {
                     winrm_operation_timeout_secs: None,
                     #[cfg(feature = "winrm")]
                     winrm_max_envelope_size: None,
+                    ansible: None,
                 },
             );
         }
@@ -3322,6 +3325,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -3350,6 +3354,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -3492,6 +3497,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -3736,6 +3742,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -3846,6 +3853,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -3918,6 +3926,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -3990,6 +3999,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -4110,6 +4120,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -4182,6 +4193,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -4292,6 +4304,7 @@ mod tests {
                     winrm_operation_timeout_secs: None,
                     #[cfg(feature = "winrm")]
                     winrm_max_envelope_size: None,
+                    ansible: None,
                 },
             );
         }
@@ -4334,6 +4347,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             };
             // Should not panic
             let _ = format!("{:?}", host.host_key_verification);
@@ -5350,6 +5364,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 

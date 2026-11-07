@@ -267,4 +267,71 @@ mod tests {
             e => panic!("Expected CommandDenied, got: {e:?}"),
         }
     }
+
+    // ============== build_command Tests ==============
+
+    fn test_host_config() -> HostConfig {
+        HostConfig {
+            hostname: "test".to_string(),
+            port: 22,
+            user: "test".to_string(),
+            auth: crate::config::AuthConfig::Agent,
+            description: None,
+            host_key_verification: crate::config::HostKeyVerification::default(),
+            proxy_jump: None,
+            socks_proxy: None,
+            sudo_password: None,
+            tags: Vec::new(),
+            os_type: crate::config::OsType::default(),
+            shell: None,
+            retry: None,
+            protocol: crate::config::Protocol::default(),
+
+            #[cfg(feature = "winrm")]
+            winrm_use_tls: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_accept_invalid_certs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_operation_timeout_secs: None,
+
+            #[cfg(feature = "winrm")]
+            winrm_max_envelope_size: None,
+            ansible: None,
+        }
+    }
+
+    #[test]
+    fn test_build_command_golden() {
+        let host = test_host_config();
+        for (extra, expected) in [
+            (
+                json!({"action": "list"}),
+                "git -C '/opt/repo' -c safe.bareRepository=explicit branch",
+            ),
+            (
+                json!({"action": "list", "remote": true}),
+                "git -C '/opt/repo' -c safe.bareRepository=explicit branch -r",
+            ),
+            (
+                json!({"action": "create", "name": "feature-x"}),
+                "git -C '/opt/repo' -c safe.bareRepository=explicit branch 'feature-x'",
+            ),
+            (
+                json!({"action": "delete", "name": "old"}),
+                "git -C '/opt/repo' -c safe.bareRepository=explicit branch -d 'old'",
+            ),
+        ] {
+            let mut v = json!({"host": "s", "path": "/opt/repo"});
+            for (k, val) in extra.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            let args: SshGitBranchArgs = serde_json::from_value(v).unwrap();
+            assert_eq!(
+                GitBranchTool::build_command(&args, &host).unwrap(),
+                expected
+            );
+        }
+    }
 }

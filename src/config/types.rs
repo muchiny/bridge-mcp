@@ -375,6 +375,54 @@ pub struct HostConfig {
     #[cfg(feature = "winrm")]
     #[serde(default)]
     pub winrm_max_envelope_size: Option<u32>,
+
+    /// What the Ansible tools may name when this host is the control host.
+    ///
+    /// Absent: a call may not pass `inventory`, an ad-hoc `user` or a
+    /// `working_dir`; Ansible then uses what `ansible.cfg` sets.
+    #[serde(default)]
+    pub ansible: Option<AnsibleHostConfig>,
+}
+
+/// Values the Ansible tools accept from a call, per control host.
+///
+/// Each list holds exact strings: a value given in a call must be equal to
+/// one entry (case-sensitive, no trimming, no glob). An empty or absent list
+/// means the argument cannot be given at all.
+///
+/// Ansible connects to every host an inventory names, with the SSH
+/// credentials of the account on the control host. An `ansible.cfg` in the
+/// working directory can set the inventory, the remote user and the keys.
+/// So the operator, not the caller, chooses these three values.
+///
+/// The lists are checked when the configuration loads. In every list an entry
+/// is not empty, holds no control character, does not start with `-` and holds
+/// no Jinja delimiter (`{{`, `{%`, `{#`). On top of that:
+///
+/// - `inventories`: an entry holding `,` is a host list and holds no `/`; the
+///   commands then enable only the `host_list` inventory plugin. Any other
+///   entry is a path: absolute, with no `$`, no `~`, no `.` or `..` segment
+///   and no trailing `/`;
+/// - `remote_users`: a valid user name;
+/// - `working_dirs`: an absolute path with no `.` or `..` segment and no
+///   trailing `/`.
+///
+/// A listed path should exist and not be writable by the SSH account or by
+/// other bridge tools.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AnsibleHostConfig {
+    /// Values a call may pass as `inventory` (an absolute path, or a
+    /// `host1,host2,` list with no `/`), exactly as written here.
+    pub inventories: Vec<String>,
+
+    /// Values a call may pass as the `user` of `ssh_ansible_adhoc`.
+    pub remote_users: Vec<String>,
+
+    /// Absolute directories (no `.` or `..` segment, no trailing `/`) a call
+    /// may pass as `working_dir` of `ssh_ansible_playbook`,
+    /// `ssh_ansible_recap` and `ssh_ansible_run_background`.
+    pub working_dirs: Vec<String>,
 }
 
 /// Per-host retry configuration override
@@ -403,6 +451,34 @@ pub const SSM_POWERSHELL_DOCUMENT: &str = "AWS-RunPowerShellScript";
 pub const SSM_SHELL_DOCUMENT: &str = "AWS-RunShellScript";
 
 impl HostConfig {
+    /// The `inventory` values a call may pass to an Ansible tool
+    /// (`hosts.<h>.ansible.inventories`), or an empty slice when the section
+    /// or the key is absent.
+    #[must_use]
+    pub fn ansible_inventories(&self) -> &[String] {
+        self.ansible
+            .as_ref()
+            .map_or(&[], |a| a.inventories.as_slice())
+    }
+
+    /// The `user` values a call may pass to `ssh_ansible_adhoc`
+    /// (`hosts.<h>.ansible.remote_users`), or an empty slice when absent.
+    #[must_use]
+    pub fn ansible_remote_users(&self) -> &[String] {
+        self.ansible
+            .as_ref()
+            .map_or(&[], |a| a.remote_users.as_slice())
+    }
+
+    /// The `working_dir` values a call may pass to the playbook tools
+    /// (`hosts.<h>.ansible.working_dirs`), or an empty slice when absent.
+    #[must_use]
+    pub fn ansible_working_dirs(&self) -> &[String] {
+        self.ansible
+            .as_ref()
+            .map_or(&[], |a| a.working_dirs.as_slice())
+    }
+
     /// The `sudo_password` to hand to `domain::privilege::elevate_with_password`,
     /// or `None` when it must not be used.
     ///

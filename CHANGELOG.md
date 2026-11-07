@@ -7,6 +7,250 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [8.0.0] - 2026-11-07
+
+**8.0.0 is a major release because of its breaking changes, and it fixes the
+security advisory GHSA-p25w-m233-2gx8: the Ansible tools
+(`ssh_ansible_playbook`, `ssh_ansible_recap`, `ssh_ansible_run_background`,
+`ssh_ansible_adhoc`, `ssh_ansible_facts` and `ssh_ansible_inventory`) let the
+caller choose the inventory, the remote user and the working directory, and
+so where Ansible connects and with which configuration, using the SSH
+credentials of the account on the control host. Upgrading is recommended.**
+The same rule as in 7.0.0 now covers them: an argument of the caller must not
+decide where a client on the target host connects while it uses a credential
+of that host. The operator, not the caller, now chooses these values, in the
+new `hosts.<host>.ansible` section of `config.yaml`. The git tools get the
+matching rule for files: a clone does not fill the default configuration
+locations that the other git tools obey. `ssh_git_clone` no longer writes
+into hidden directories such as `~/.ssh` or `~/.config`, and every git tool
+runs with `safe.bareRepository=explicit`. The breaking changes are the
+refusals and command changes that close that advisory, and each says what to
+use instead.
+
+The count is 16 by the bar of 6.0.0 (its notes below give the rule):
+something that worked against 7.0.0 now needs a change. 12 are behaviour
+changes and 4 are in the library API, all as items of the `Breaking` bullets
+of `### Changed` (8 under the Ansible bullet, 2 under the destructive bullet,
+4 under the `ssh_git_clone` bullet and 2 under the bare repository bullet).
+A change that shows both in a tool and in the library builder or validator
+behind it is counted once for each. Not counted, by the same
+bar: the new `ansible` config section, the new public validators and the new
+`HostConfig` accessors listed under `### Added`, which are additive; a call
+to an Ansible tool that names none of the three arguments and no `extra_vars`
+key of the refused names (its command is the one 7.0.0 built); the checks of
+the new config section at load; a refusal that now shows the offending value
+escaped and cut to 120 characters; the `/.git` URL that `ssh_git_clone` no
+longer refuses, which loosens a check; the URLs from which git derives no
+directory name, where git itself stops; and the corrected tool descriptions.
+
+### Added
+
+- **`hosts.<host>.ansible` in `config.yaml`.** Three lists of exact strings
+  that name what the Ansible tools may accept from a call when that host is
+  the control host. A value in a call is accepted only when it is equal to
+  one entry (case-sensitive, no trimming, no glob). An absent section, an
+  absent list or an empty list means the call cannot give that argument at
+  all.
+  - `inventories`: the values a call may pass as `inventory` (a path, or a
+    `host1,host2,` list), written exactly as in the call.
+  - `remote_users`: the values a call may pass as the `user` of
+    `ssh_ansible_adhoc`.
+  - `working_dirs`: the absolute directories a call may pass as `working_dir`
+    of `ssh_ansible_playbook`, `ssh_ansible_recap` and
+    `ssh_ansible_run_background`.
+
+  The lists are checked when the configuration loads, and a bad entry is a
+  `ConfigInvalid` error naming `hosts.<host>.ansible.<key>`. In every list an
+  entry must not be empty, hold a control character, start with `-` or hold a
+  Jinja delimiter. On top of that:
+  - a `remote_users` entry must be a valid user name;
+  - a `working_dirs` entry must be an absolute path with no `.` or `..`
+    segment and no trailing `/` (so `/` alone is refused);
+  - an `inventories` entry that holds `,` is a host list: it must not hold
+    `/`, and the commands enable only the `host_list` inventory plugin for it
+    (see the Breaking list below);
+  - any other `inventories` entry is a path: it must be absolute, with no
+    `$`, no `~`, no `.` or `..` segment and no trailing `/`, because Ansible
+    expands `$VAR` and `~` and joins a relative path to the current
+    directory.
+
+  An unknown key under `ansible:` is rejected like any other unknown key.
+
+- **New public validators and accessors in the library.** They hold the
+  checks the tools above now make. The builders do not call them: a library
+  caller must call them first.
+  `AnsibleCommandBuilder::validate_inventory_choice(host: &str, value: &str,
+  allowed: &[String]) -> Result<()>`,
+  `AnsibleCommandBuilder::validate_remote_user_choice(host: &str, value: &str,
+  allowed: &[String]) -> Result<()>`,
+  `AnsibleCommandBuilder::validate_working_dir_choice(host: &str, value: &str,
+  allowed: &[String]) -> Result<()>` (each returns `CommandDenied` when
+  `value` is not equal to an entry of `allowed`, and an empty `allowed`
+  refuses every value; the refusal shows `value` escaped and cut to its first
+  120 characters),
+  `AnsibleCommandBuilder::host_list_precheck(working_dir: Option<&str>,
+  inventory: Option<&str>) -> String` (the host-list guard as a foreground
+  prefix, empty when `inventory` holds no `,`; the builders already carry the
+  guard itself) and
+  `GitCommandBuilder::validate_clone_destination(destination: Option<&str>,
+  url: &str) -> Result<()>`. The type `AnsibleHostConfig` (fields
+  `inventories`, `remote_users` and `working_dirs`, all `Vec<String>`) holds
+  the section, and `HostConfig::ansible_inventories()`,
+  `ansible_remote_users()` and `ansible_working_dirs()` return its lists as
+  `&[String]`, empty when the section or the key is absent.
+
+### Changed
+
+- **Breaking: the Ansible tools accept only the inventory, remote user and
+  working directory that the operator lists for the control host, and a few
+  more values are refused or built differently.** Each item below is one
+  breaking change. A refusal names the allowed values and the config key to
+  edit.
+  - The `inventory` of `ssh_ansible_playbook`, `ssh_ansible_recap`,
+    `ssh_ansible_run_background`, `ssh_ansible_adhoc`, `ssh_ansible_facts`
+    and `ssh_ansible_inventory` must be equal to an entry of
+    `hosts.<host>.ansible.inventories`. Migration: list the value there, or
+    leave `inventory` out and set the inventory in `ansible.cfg` on the
+    control host.
+  - The `user` of `ssh_ansible_adhoc` must be equal to an entry of
+    `hosts.<host>.ansible.remote_users`. Migration: list the user there, or
+    leave `user` out and set `remote_user` in `ansible.cfg` or in the
+    inventory.
+  - The `working_dir` of `ssh_ansible_playbook`, `ssh_ansible_recap` and
+    `ssh_ansible_run_background` must be equal to an entry of
+    `hosts.<host>.ansible.working_dirs`, because an `ansible.cfg` in that
+    directory sets the inventory, the remote user, the keys and the plugin
+    paths. Migration: list the directory there, or leave `working_dir` out
+    and use absolute paths.
+  - The `extra_vars` of the three playbook tools refuse the names of
+    Ansible's special variables that do not start with `ansible_` (those were
+    already refused): `delegated_vars`, `group_names`, `groups`, `hostvars`,
+    `inventory_dir`, `inventory_file`, `inventory_hostname`,
+    `inventory_hostname_short`, `omit`, `play_hosts`, `playbook_dir`,
+    `role_name`, `role_names` and `role_path`. Ansible sets them itself, and
+    a connection plugin or the inventory may read them (the `ssh` plugin
+    takes its host from `inventory_hostname`). The match is exact:
+    `environment`, `vars`, `group` or `host` stay allowed. Migration: use
+    another variable name.
+  - An `inventory` that holds `,` (a host list) now starts the command with
+    `ANSIBLE_INVENTORY_ENABLED=host_list` instead of
+    `ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml`. Ansible does not
+    resolve such a value to a path, and the `host_list` plugin refuses it
+    when a file or directory of that name exists, so with that plugin alone no
+    file named like the list is read as an inventory. The command also starts
+    with a shell guard that stops it (exit status 2, message on stderr) when
+    a file, directory or symlink of that name exists in the working
+    directory, whose `group_vars` and `host_vars` Ansible would still read;
+    `ssh_ansible_run_background` runs that guard in the foreground too. Any
+    other `inventory` keeps the four plugins. The command text changes for these six tools, so
+    a whitelist or audit pattern anchored on the old text no longer matches.
+    Migration: allow the new text in the pattern.
+  - **Breaking (lib API):** `HostConfig` gains the field `ansible:
+    Option<AnsibleHostConfig>`. A struct literal of `HostConfig` in code that
+    uses the library stops compiling until it adds `ansible: None`. The
+    Ansible builders (`build_*`) and `validate_inventory` do not read the new
+    field: a library caller that builds commands itself must call the three
+    validators under `### Added` first.
+  - **Breaking (lib API):** `AnsibleCommandBuilder::build_playbook_command`,
+    `build_inventory_command`, `build_adhoc_command` and
+    `build_facts_command` keep their signatures and, for an `inventory` that
+    holds `,`, emit `ANSIBLE_INVENTORY_ENABLED=host_list` in place of the
+    four-plugin list. The recap and background tools use
+    `build_playbook_command`. A library caller that compares the command text
+    must follow.
+  - **Breaking (lib API):** `AnsibleCommandBuilder::validate_extra_vars`
+    returns `CommandDenied` for the 14 special variable names above, where it
+    accepted them.
+- **Breaking: more tools are annotated destructive.** Each item below is one
+  breaking change. With `security.require_elicitation_on_destructive: true`
+  (the default) they now ask for confirmation before they run: over MCP the
+  client must declare the `elicitation` capability, on the CLI a terminal
+  prompts and a script without a terminal gets exit 4 unless it passes
+  `--yes`, and over HTTP (`serve-http`) they are refused outright.
+  Migration: confirm the call, pass `--yes` in scripts, or call them from a
+  stdio MCP client that declares `elicitation`. The count of tools annotated
+  destructive is now 50 (47 in 7.0.0), and `README.md` states it.
+  - `ssh_ansible_recap` and `ssh_ansible_run_background` run a whole
+    playbook, as `ssh_ansible_playbook` does, and were annotated as an
+    ordinary write.
+  - `ssh_git_clone` writes a new directory tree whose content the repository
+    chooses, and was annotated as an ordinary write.
+- **Breaking: `ssh_git_clone` writes only to a visible, absolute path.** Each
+  item below is one breaking change. For a hidden target, use `ssh_exec`,
+  under its own policy.
+  - A `destination` that is not an absolute path is refused: an empty value,
+    a relative path and `~/x` (the tilde is not expanded). Migration: pass the
+    full path, for example `/srv/repos/name`.
+  - A `destination` with a component that starts with `.` is refused, split on
+    `/` and `\`: `.`, `..`, `.ssh`, `.config`, `.git`, `.dotfiles`. The clone
+    would create or fill the hidden configuration directories of the SSH
+    user. Migration: choose a path without a hidden component. (`\` is not a
+    separator for git on Linux, so `/a\.b` is refused though git would
+    create `a\.b`.)
+  - Without `destination`, a URL whose derived directory name starts with `.`
+    is refused (`https://host/r/.cfg`, `host:.x`). The name is the one git
+    computes (`git_url_basename` in git's `dir.c`, compared with git 2.56 on
+    343 URLs): git drops the scheme, the user information up to the last `@`
+    before the first `/`, a trailing `/` and a `/.git`, then the `:port` of a
+    URL with no `/`, takes what follows the last `/` or `:`, and removes a
+    `.git` suffix. A URL from which git derives no name (empty, `https://`,
+    `.git`) is refused too, where git itself stops. The name a git older than
+    2.6 derives (without the scheme, user information and port steps) is
+    checked as well. Migration: pass a `destination` as above.
+  - Without `destination`, a URL that holds a byte `<= 0x20` (a space, a tab,
+    a line break or another control character) or `0x7f` is refused: git
+    rewrites some of those bytes in the name it derives and the check does
+    not model that. Migration: pass a `destination`; with one, the URL is not
+    restricted by this rule.
+- **Breaking: the git tools refuse a bare repository given as `path`.** Each
+  item below is one breaking change.
+  - `ssh_git_status`, `ssh_git_log`, `ssh_git_diff`, `ssh_git_pull`,
+    `ssh_git_branch` and `ssh_git_checkout` run `git -C PATH -c
+    safe.bareRepository=explicit ...`, and `ssh_git_clone` starts git with the
+    same option, so git does not discover a bare repository by itself (this
+    stops a bare repository placed inside a working tree from being used as
+    its git directory, with its configuration and hooks). A `path` that is a
+    bare repository fails with git's "cannot use bare repository" error.
+    Cloning from a bare repository or a bare remote, and pulling from one,
+    are unchanged. The command text also changes, so a whitelist or audit
+    pattern anchored on `^git -C 'PATH' status` no longer matches. Migration:
+    pass the path of a working tree, or run `git --git-dir=PATH ...` through
+    `ssh_exec`, under its own policy; allow the option in the pattern. The
+    option exists since git 2.38: an older git ignores it, which is a limit
+    of the protection, not a refusal (see `SECURITY.md`).
+  - **Breaking (lib API):** `GitCommandBuilder::build_status_command`,
+    `build_log_command`, `build_diff_command`, `build_pull_command`,
+    `build_clone_command`, `build_branch_command` and
+    `build_checkout_command` keep their signatures and emit
+    `-c safe.bareRepository=explicit` right after `git -C PATH` (after `git`
+    for `build_clone_command`), before the subcommand. They do not validate: a
+    library caller must call `GitCommandBuilder::validate_clone_destination`
+    first for a clone.
+
+- **Tool descriptions corrected.** The `inventory` argument of the six
+  Ansible tools, the `user` of `ssh_ansible_adhoc`, the `working_dir` of the
+  three playbook tools and the `destination` of `ssh_git_clone` now state the
+  rules above.
+
+### Security
+
+- **The Ansible tools no longer let the caller choose where Ansible connects
+  or with which configuration.** The inventory, the ad-hoc remote user and the
+  working directory (and so the `ansible.cfg` found there) must be values that
+  the operator listed for the control host, and a host list is read by the
+  `host_list` plugin alone. The `extra_vars` of the playbook tools no longer
+  accept the names of Ansible's special variables. Calls that name none of
+  them are unchanged. `SECURITY.md` lists what the lists do not cover: a
+  playbook or `ansible.cfg` the caller can write, the bridge `sudo` and
+  `sudo_user` parameters, and the AWX tools.
+- **`ssh_ansible_recap`, `ssh_ansible_run_background` and `ssh_git_clone` now
+  go through the confirmation gate**, like `ssh_ansible_playbook`.
+- **`ssh_git_clone` no longer creates or fills hidden directories of the SSH
+  user, and the git tools no longer discover a bare repository by
+  themselves** (`safe.bareRepository=explicit`, git 2.38 and later). The
+  rule reads the text of the path and of the URL; `SECURITY.md` lists the
+  locations it does not cover.
+
 ## [7.0.0] - 2026-11-07
 
 **7.0.0 is a major release because of its breaking changes, and it fixes the
@@ -6625,7 +6869,8 @@ This release marks the first stable version of MCP SSH Bridge with a completely 
 - Hexagonal architecture (ports & adapters)
 - Extensible tool handler registry (Open/Closed principle)
 
-[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v7.0.0...HEAD
+[Unreleased]: https://github.com/muchiny/bridge-mcp/compare/v8.0.0...HEAD
+[8.0.0]: https://github.com/muchiny/bridge-mcp/compare/v7.0.0...v8.0.0
 [7.0.0]: https://github.com/muchiny/bridge-mcp/compare/v6.0.0...v7.0.0
 [6.0.0]: https://github.com/muchiny/bridge-mcp/compare/v5.0.1...v6.0.0
 [5.0.1]: https://github.com/muchiny/bridge-mcp/compare/v5.0.0...v5.0.1

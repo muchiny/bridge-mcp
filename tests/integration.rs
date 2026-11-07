@@ -52,6 +52,7 @@ fn create_test_config() -> Config {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 
@@ -84,6 +85,7 @@ fn create_test_config() -> Config {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 
@@ -523,6 +525,7 @@ fn test_proxy_jump_config() {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 
@@ -559,6 +562,7 @@ fn test_proxy_jump_config() {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 
@@ -628,6 +632,7 @@ fn test_proxy_jump_resolution() {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 
@@ -660,6 +665,7 @@ fn test_proxy_jump_resolution() {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 
@@ -725,6 +731,7 @@ fn test_proxy_jump_chain_detection() {
 
         #[cfg(feature = "winrm")]
         winrm_max_envelope_size: None,
+        ansible: None,
     };
 
     let host_without_jump = HostConfig {
@@ -754,6 +761,7 @@ fn test_proxy_jump_chain_detection() {
 
         #[cfg(feature = "winrm")]
         winrm_max_envelope_size: None,
+        ansible: None,
     };
 
     assert!(host_with_jump.proxy_jump.is_some());

@@ -313,6 +313,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
 
@@ -407,6 +408,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         write_config_to_file(&config_path, &initial_config);
@@ -551,6 +553,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         atomic_save(&config_path, &initial_config);
@@ -1001,6 +1004,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         atomic_save(&config_path, &updated);
@@ -1094,6 +1098,7 @@ mod tests {
                     winrm_operation_timeout_secs: None,
                     #[cfg(feature = "winrm")]
                     winrm_max_envelope_size: None,
+                    ansible: None,
                 },
             );
             write_config_to_file(&config_path, &cfg);

@@ -1712,6 +1712,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         let ctx = crate::ports::mock::create_test_context_with_hosts(hosts);
@@ -2283,6 +2284,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         hosts

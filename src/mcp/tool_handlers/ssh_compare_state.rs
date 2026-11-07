@@ -196,6 +196,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         };
         let args = SshCompareStateArgs {
             host: "server1".to_string(),

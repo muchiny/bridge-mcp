@@ -598,6 +598,7 @@ mod tests {
             winrm_accept_invalid_certs: None,
             winrm_operation_timeout_secs: None,
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 

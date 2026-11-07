@@ -303,6 +303,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         };
         let args = SshPtyExecArgs {
             host: "s".to_string(),
@@ -348,6 +349,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         };
         let args = SshPtyExecArgs {
             host: "s".to_string(),

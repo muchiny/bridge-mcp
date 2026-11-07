@@ -80,6 +80,7 @@ fn build_docker_ctx() -> ToolContext {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 

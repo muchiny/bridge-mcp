@@ -1117,7 +1117,14 @@ async fn call(
     reason = "the sweep and its report read best as one walk over the registry"
 )]
 async fn every_tool_keeps_each_argument_one_quoted_word() {
-    let posix = sweep_context("linux", "");
+    // The Ansible tools take an `inventory` or a `working_dir` only when the
+    // host lists it (`hosts.<host>.ansible`). List the hostile value, so that
+    // it still reaches the builders instead of the allow-list check.
+    let listed = format!(
+        r#","ansible":{}"#,
+        json!({"inventories": [METACHARS], "working_dirs": [METACHARS, DASHED]})
+    );
+    let posix = sweep_context("linux", &listed);
     let pwsh = sweep_context("windows", r#","shell":"powershell""#);
     let registry = crate::mcp::registry::create_all_enabled_registry();
     let mut tools = registry.list_tools();

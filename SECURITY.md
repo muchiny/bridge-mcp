@@ -131,6 +131,46 @@ evaluates, and it does not make a whitelisted or permitted module safe.
 - An `inventory` that starts with `-` (all tools that take one:
   `ssh_ansible_adhoc`, `ssh_ansible_facts`, `ssh_ansible_inventory` and the
   playbook tools).
+- **An `inventory`, an ad-hoc `user` or a `working_dir` that the operator did
+  not list.** Ansible connects to every host the inventory names, with the SSH
+  credentials of the account on the control host, logs in as the `user`, and
+  reads the `ansible.cfg` of the working directory, which can set the
+  inventory, the remote user, the keys and the plugin paths. So the operator
+  chooses these values, in `hosts.<host>.ansible` of `config.yaml`: the
+  `inventory` of `ssh_ansible_playbook`, `ssh_ansible_recap`,
+  `ssh_ansible_run_background`, `ssh_ansible_adhoc`, `ssh_ansible_facts` and
+  `ssh_ansible_inventory` must be equal to an entry of `inventories`, the
+  `user` of `ssh_ansible_adhoc` to an entry of `remote_users`, and the
+  `working_dir` of the three playbook tools to an entry of `working_dirs`.
+  The comparison is on the exact string (case-sensitive, no trimming, no glob,
+  no expansion): a value that only resolves to a listed one (`..`, `$VAR`,
+  `~`, a symlink, another spelling of the same path) is refused, and only the
+  listed text passes. What a listed entry names is the operator's choice and
+  responsibility (see "Limits of this protection" under "Destination
+  Arguments and Stored Credentials"). An absent or empty list refuses the
+  argument. A call that leaves the argument out is not affected and uses
+  `ansible.cfg`. The entries are checked when the configuration loads:
+  - in every list: not empty, no control character, no leading `-`, no Jinja
+    delimiter;
+  - `remote_users`: a valid user name;
+  - `working_dirs`: an absolute path with no `.` or `..` segment and no
+    trailing `/`;
+  - `inventories`: an entry with `,` is a host list and must not hold `/`;
+    any other entry is a path, absolute, with no `$`, no `~`, no `.` or `..`
+    segment and no trailing `/` (Ansible expands `$VAR` and `~` in an
+    inventory path and joins a relative one to the current directory).
+
+  The refusal names the allowed values and the key to edit, shows the value
+  of the call escaped and cut to its first 120 characters, and is recorded in
+  the audit log as a denied command.
+- An `extra_vars` key (`ssh_ansible_playbook`, `ssh_ansible_recap`,
+  `ssh_ansible_run_background`) that starts with `ansible_` or is one of
+  Ansible's other special variable names: `delegated_vars`, `group_names`,
+  `groups`, `hostvars`, `inventory_dir`, `inventory_file`,
+  `inventory_hostname`, `inventory_hostname_short`, `omit`, `play_hosts`,
+  `playbook_dir`, `role_name`, `role_names` and `role_path`. Ansible sets
+  them itself and a connection plugin or the inventory may read them (the
+  `ssh` plugin takes its host from `inventory_hostname`). The match is exact.
 - A `vault_password_file`, or a `vault_id` as a whole or the file after its
   first `@`, that starts with `-` or holds a control character; and a vault
   file path holding `$`, a `..` segment or a `~user` prefix, which Ansible
@@ -140,13 +180,22 @@ evaluates, and it does not make a whitelisted or permitted module safe.
 
 Two protections work on the command the tool builds, not on the arguments:
 
-- **Inventory plugins.** When the caller names an `inventory`, the command
-  starts with `ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml`, placed
+- **Inventory plugins.** When the caller names an `inventory` without `,`, the
+  command starts with `ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml`, placed
   directly in front of the Ansible program (after any `cd`, and inside the
   `bash -c` of `ssh_ansible_run_background`). Ansible's default list also
   holds the `script` plugin, which runs any `-i` source the user can execute
   (every file of a directory) and `auto`, so the source the caller names is
-  parsed as data and never run. Without an `inventory` argument the command is
+  parsed as data and never run. When the `inventory` holds `,` (a host list),
+  the command starts with `ANSIBLE_INVENTORY_ENABLED=host_list` alone:
+  Ansible does not resolve such a value to a path, and the `host_list` plugin
+  refuses it when a file or directory of that name exists, so no plugin reads
+  a file named like the list. Ansible's vars plugins would still read the
+  `group_vars` and `host_vars` of such a path, so the command also starts with
+  a shell guard, in the working directory, that stops it with exit status 2
+  and a message on stderr when a file, directory or symlink of that name
+  exists (`ssh_ansible_run_background` runs it in the foreground too, before
+  the launch). Without an `inventory` argument the command is
   unchanged and the operator's configured inventory applies. This covers
   `ssh_ansible_adhoc`, `ssh_ansible_playbook`, `ssh_ansible_facts`,
   `ssh_ansible_inventory`, `ssh_ansible_recap` and
@@ -169,13 +218,20 @@ Two protections work on the command the tool builds, not on the arguments:
   `ssh_ansible_recap` and `ssh_ansible_run_background`.
 
 By design, the playbook tools (`ssh_ansible_playbook`, `ssh_ansible_recap`,
-`ssh_ansible_run_background`) run the playbook the caller names, in the
-`working_dir` the caller names (and so with the `ansible.cfg` found there),
-and `ssh_ansible_lint` lints the target the caller names. The whitelist does
-not judge a playbook, its tasks, its roles or an `ansible.cfg`: they are files
-on the control host, and what they run is limited by what the host's own
-account may do. Keep playbooks and directories that an untrusted party can
-write out of reach of these tools.
+`ssh_ansible_run_background`) run the playbook the caller names, and
+`ssh_ansible_lint` lints the target the caller names. They run in the
+`working_dir` the caller names only when the operator listed that directory
+in `hosts.<host>.ansible.working_dirs`; otherwise they run in the directory
+the SSH session starts in, with the `ansible.cfg` found there, and the
+operator's own inventory applies unless the call names a listed one. The
+whitelist does not judge a playbook, its tasks, its roles or an `ansible.cfg`:
+they are files on the control host, and what they run is limited by what the
+host's own account may do. Keep playbooks and directories that an untrusted
+party can write out of reach of these tools (see "Limits of this protection"
+under "Destination Arguments and Stored Credentials"). `ssh_ansible_recap` and
+`ssh_ansible_run_background` run a whole playbook like `ssh_ansible_playbook`,
+so they are annotated destructive and go through the same confirmation, as
+does `ssh_git_clone`.
 
 - **Standard** (default) and **Strict**: command tools need a whitelist match
   (the validator treats the two modes the same)
@@ -327,6 +383,31 @@ a file of the host. Three ways to keep this true:
     name: credential helpers (`store`, `cache`, `libsecret`, a manager),
     `~/.netrc` `machine` entries and `http.<url>.extraHeader`.
 
+  - `ssh_git_clone` writes only to a visible, absolute path, and is annotated
+    destructive (it goes through the confirmation gate). A `destination` must
+    start with `/`, and none of its components, split on `/` and `\`, may
+    start with `.` (`.ssh`, `.config`, `.git`, `..`); `~` is not expanded.
+    Without `destination`, the directory name must not start with `.`, and it
+    is the one git computes (`git_url_basename` in git's `dir.c`: scheme,
+    user information, a trailing `/` and `/.git`, a `:port`, then what
+    follows the last `/` or `:`, and a `.git` suffix; `\` is not a
+    separator), so `https://host/r/.git` derives `r` and is accepted, while
+    `https://host/r/.cfg` and `host:.x` are refused. A URL with a byte
+    `<= 0x20` or `0x7f` is refused when `destination` is absent, and so is a
+    URL from which git derives no name. A git older than 2.6 skips neither the
+    scheme nor the user information, so the name it would derive is checked
+    too. A clone therefore does not create or
+    fill the default configuration locations under the home directory of the
+    SSH user, which all sit below a hidden component. A hidden target needs
+    `ssh_exec`, under its own policy.
+  - All seven git tools (`ssh_git_status`, `ssh_git_log`, `ssh_git_diff`,
+    `ssh_git_pull`, `ssh_git_clone`, `ssh_git_branch`, `ssh_git_checkout`) run
+    git with `-c safe.bareRepository=explicit`, so git does not discover a
+    bare repository by itself (one placed inside a working tree, for example
+    by a clone, would otherwise be used with its own configuration). A bare
+    repository given as `path` fails; cloning from or pulling from a bare
+    remote does not.
+
 The tools `ssh_mysql_query`, `ssh_postgresql_query`, `ssh_mysql_status` and
 `ssh_postgresql_status` take no host and no password: they connect to the
 local server with the stored credentials.
@@ -358,6 +439,53 @@ Limits of this protection:
   configuration holds an unscoped `extraHeader` followed by a scoped one that
   matches the destination, both are sent. `branch` of `ssh_git_pull` is still
   a free refspec: it can name a local ref, not a server.
+- The Ansible allow-lists choose where Ansible connects and with which
+  configuration; they do not judge what a file does. A playbook or an
+  `ansible.cfg` that the caller can write is still code on the control host
+  (`add_host`, `delegate_to`, a plugin path, a callback), and the whitelist
+  does not see inside it. A listed inventory file or directory, and a listed
+  working directory, must not be writable by the SSH account or by another
+  tool of the bridge (`ssh_file_write`, a clone, an upload): a caller that can
+  change a listed inventory can change where Ansible connects, and one that can
+  write an `ansible.cfg` or a playbook in a listed directory can run it. A
+  listed path must exist: one that is missing is a path the caller may create.
+  Matching is on the string in `config.yaml`, not on the file behind it:
+  keep listed paths free of symlinks that others can repoint.
+- The host-list guard checks the working directory when the command starts.
+  A path of that name created between the check and Ansible's read is not
+  seen; its `group_vars` and `host_vars` would load for the implicit
+  `localhost` and the `all` group.
+- A call that passes the bridge `sudo` or `sudo_user` parameters runs Ansible
+  as that account on the control host: with its SSH keys, its `ssh_config`
+  and the `ansible.cfg` it finds. The lists in `hosts.<host>.ansible` do not
+  change that. This is documented, not refused: grant `sudo` on a control host
+  knowing which account it reaches.
+- The AWX tools (`ssh_awx_*`, including `ssh_awx_adhoc_launch`) are governed by
+  AWX, not by `hosts.<host>.ansible`: the inventories, credentials and
+  projects of a job are those of AWX and of the AWX account the bridge uses,
+  and AWX permissions decide what they may use.
+- Git older than 2.38 ignores `safe.bareRepository`: on such a host the git
+  tools still discover a bare repository by themselves, and nothing is
+  refused. Check `git --version` on the hosts you use them on.
+- The `ssh_git_clone` destination rule is read on the text of the path and of
+  the URL. It keeps a clone out of the default configuration locations below
+  the home directory; it does not cover:
+  - paths that the account's own git configuration names and that need not be
+    hidden: `core.hooksPath`, `include.path` and `includeIf.<condition>.path`,
+    `init.templateDir`, `core.excludesFile` and `core.attributesFile`, and an
+    `XDG_CONFIG_HOME` that points outside a hidden directory (git and other
+    tools then read their files below it);
+  - symlinks: a visible path whose parent or target is a symlink to a hidden
+    or configuration directory is accepted, and the clone follows it (git
+    fills an empty directory, symlink targets included);
+  - non-hidden directories that mean something to the account, such as
+    `$HOME/bin` when `PATH` lists it;
+  - empty system directories, when the call runs under `sudo`: an absolute
+    `destination` that exists, is empty and is writable by the target user.
+
+  Do not point such settings at a visible path that other tools can write,
+  keep the directories you clone into free of symlinks that others can
+  create, and grant `sudo` on a git tool knowing it.
 - `ssh_aws_cli` runs with the AWS identity of the host and reads whatever
   that identity can read, stored secrets included (`secretsmanager
   get-secret-value`, `ssm get-parameter`): any API call that identity may make

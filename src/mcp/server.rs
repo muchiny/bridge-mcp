@@ -9809,6 +9809,7 @@ rbac:
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         let (server, _audit_task) = McpServer::new(config);
@@ -9933,6 +9934,7 @@ rbac:
                     winrm_operation_timeout_secs: None,
                     #[cfg(feature = "winrm")]
                     winrm_max_envelope_size: None,
+                    ansible: None,
                 },
             );
         }

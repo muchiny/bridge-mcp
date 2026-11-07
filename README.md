@@ -287,7 +287,7 @@ a tool whose group is off returns "registered but its group … is not enabled".
 
 ### Destructive tools and confirmation
 
-45 tools are annotated destructive (`destructiveHint: true`), **`ssh_exec`
+50 tools are annotated destructive (`destructiveHint: true`), **`ssh_exec`
 among them**: `ssh_file_write`, `ssh_process_kill`, `ssh_service_stop`,
 `ssh_k8s_delete`, `ssh_helm_rollback`, `ssh_win_service_stop`, … With
 `security.require_elicitation_on_destructive: true` (the default):
@@ -438,6 +438,7 @@ At least one host is required (hosts imported through `ssh_config` count).
 | `winrm_accept_invalid_certs` | bool (feature `winrm`) | `false` | Accept a certificate that fails verification (self-signed, internal CA). Refused with `auth: password`. Without it the certificate must chain to a public root: winrm-rs checks the roots it bundles, not the bridge host's store |
 | `winrm_operation_timeout_secs` | integer (feature `winrm`) | `60` | WS-Management operation timeout |
 | `winrm_max_envelope_size` | integer (feature `winrm`) | `153600` | Maximum SOAP envelope, bytes |
+| `ansible` | map: `inventories`, `remote_users`, `working_dirs` (lists of strings) | — | What the Ansible tools may accept from a call when this host is the control host: the `inventory` (six tools), the `user` of `ssh_ansible_adhoc` and the `working_dir` of the three playbook tools must equal an entry (an `inventories` entry is an absolute path without `$`, `~`, `.`/`..` segment or trailing `/`, or a `host1,host2,` list with no `/`; a `working_dirs` entry is an absolute path without `.`/`..` segment or trailing `/`). An absent or empty list refuses the argument. See [`config/README.md`](config/README.md#ansible-control-hosts) |
 | `retry` | map | — | Accepted but not used in 4.0.0; use `limits.retry_*` |
 
 **`auth`** is a map tagged by `type`:

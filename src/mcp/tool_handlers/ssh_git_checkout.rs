@@ -252,6 +252,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 
@@ -265,6 +266,19 @@ mod tests {
         assert_ne!(cmd, "");
         assert!(cmd.contains("git"));
         assert!(cmd.contains("checkout"));
+    }
+
+    #[test]
+    fn test_build_command_golden() {
+        let args: SshGitCheckoutArgs = serde_json::from_value(
+            json!({"host": "s", "path": "/opt/repo", "target": "feature", "create": true}),
+        )
+        .unwrap();
+        let cmd = GitCheckoutTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(
+            cmd,
+            "git -C '/opt/repo' -c safe.bareRepository=explicit checkout -b 'feature'"
+        );
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {
@@ -304,6 +318,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         hosts
@@ -390,7 +405,10 @@ mod tests {
                 .unwrap();
         GitCheckoutTool::validate(&args, &test_host_config()).unwrap();
         let cmd = GitCheckoutTool::build_command(&args, &test_host_config()).unwrap();
-        assert_eq!(cmd, "git -C '/opt/repo' checkout '-'");
+        assert_eq!(
+            cmd,
+            "git -C '/opt/repo' -c safe.bareRepository=explicit checkout '-'"
+        );
     }
 
     #[test]

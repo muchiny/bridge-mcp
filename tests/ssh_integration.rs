@@ -115,6 +115,7 @@ fn to_host_config(config: &SshTestConfig) -> HostConfig {
 
         #[cfg(feature = "winrm")]
         winrm_max_envelope_size: None,
+        ansible: None,
     }
 }
 

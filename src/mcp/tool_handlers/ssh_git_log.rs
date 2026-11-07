@@ -278,6 +278,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 
@@ -300,6 +301,20 @@ mod tests {
         assert!(cmd.contains("git"));
         assert!(cmd.contains("log"));
         assert!(cmd.contains("/opt/repo"));
+    }
+
+    #[test]
+    fn test_build_command_golden() {
+        let args: SshGitLogArgs = serde_json::from_value(json!({
+            "host": "s", "path": "/opt/repo", "max_count": 5, "oneline": true,
+            "branch": "main"
+        }))
+        .unwrap();
+        let cmd = GitLogTool::build_command(&args, &test_host_config()).unwrap();
+        assert_eq!(
+            cmd,
+            "git -C '/opt/repo' -c safe.bareRepository=explicit log --max-count=5 --oneline 'main'"
+        );
     }
 
     #[test]

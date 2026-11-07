@@ -201,6 +201,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         };
         let args = SshFleetDiffArgs {
             host: "web1".to_string(),

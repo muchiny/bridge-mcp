@@ -9,6 +9,20 @@
 //! are not sent. An unscoped `http.sslCert` / `http.sslKey`, a credential
 //! helper that answers for any host and a `~/.netrc` `default` entry are
 //! presented to the URL (see `domain::use_cases::git`).
+//!
+//! `destination` must be an absolute path none of whose components starts with
+//! `.`, and when it is absent the directory name that git derives from the URL
+//! must not start with `.` (nor be empty), and the URL must hold no whitespace
+//! or control byte (git rewrites those in the name it derives): the clone would
+//! otherwise create or fill hidden configuration directories of the SSH user
+//! (`~/.ssh`, `~/.config`, ...). The rule refuses a superset of what git would
+//! create, and does not cover everything: see `domain::use_cases::git`.
+//!
+//! The tool is annotated `destructive`, so the confirmation policy
+//! (`security.require_elicitation_on_destructive`) asks before a clone: it
+//! fills a directory with files chosen by whoever controls the repository.
+//! Git runs with `-c safe.bareRepository=explicit` (Git 2.38 and later; an
+//! older git ignores it).
 
 use serde::Deserialize;
 
@@ -41,7 +55,7 @@ pub struct SshGitCloneArgs {
 
 impl_common_args!(SshGitCloneArgs);
 
-#[mcp_standard_tool(name = "ssh_git_clone", group = "git", annotation = "mutating")]
+#[mcp_standard_tool(name = "ssh_git_clone", group = "git", annotation = "destructive")]
 pub struct GitCloneTool;
 
 impl StandardTool for GitCloneTool {
@@ -56,7 +70,11 @@ impl StandardTool for GitCloneTool {
         entry, http.<url>.extraHeader) still apply. An unscoped http.sslCert / http.sslKey in \
         the host's git config, a credential helper that answers for any host and a ~/.netrc \
         default entry are presented to the URL: operators avoid them on hosts exposed to \
-        these tools.";
+        these tools. `destination` must be an absolute path with no component starting with '.' \
+        (a hidden directory such as ~/.ssh or ~/.config is refused); when it is omitted, the \
+        directory name git derives from the URL must not start with '.' (and the URL must hold \
+        no whitespace or control character in that case). Git runs with \
+        safe.bareRepository=explicit. The tool asks for confirmation (destructive).";
 
     const SCHEMA: &'static str = r#"{
         "type": "object",
@@ -71,7 +89,7 @@ impl StandardTool for GitCloneTool {
             },
             "destination": {
                 "type": "string",
-                "description": "Target directory path on the remote host (default: derived from URL)"
+                "description": "Target directory on the remote host: an absolute path (starting with '/', '~' is not expanded) with no component starting with '.'. Default: the name git derives from the URL, which must not start with '.' (the URL must then hold no whitespace or control character). For a hidden target such as ~/.dotfiles, use ssh_exec."
             },
             "branch": {
                 "type": "string",
@@ -107,7 +125,8 @@ impl StandardTool for GitCloneTool {
 
     fn validate(args: &SshGitCloneArgs, _host_config: &HostConfig) -> Result<()> {
         GitCommandBuilder::validate_not_option("url", Some(args.url.as_str()))?;
-        GitCommandBuilder::validate_not_option("branch", args.branch.as_deref())
+        GitCommandBuilder::validate_not_option("branch", args.branch.as_deref())?;
+        GitCommandBuilder::validate_clone_destination(args.destination.as_deref(), &args.url)
     }
 
     fn build_command(args: &SshGitCloneArgs, _host_config: &HostConfig) -> Result<String> {
@@ -270,6 +289,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 
@@ -291,8 +311,8 @@ mod tests {
         assert_eq!(
             cmd,
             "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
-             git -c http.extraHeader= clone --branch 'main' --depth 1 --single-branch \
-             -- 'https://git.example.org/o/r.git' '/opt/r'"
+             git -c safe.bareRepository=explicit -c http.extraHeader= clone --branch 'main' \
+             --depth 1 --single-branch -- 'https://git.example.org/o/r.git' '/opt/r'"
         );
     }
 
@@ -313,7 +333,8 @@ mod tests {
         assert_eq!(
             cmd,
             "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
-             git -c http.extraHeader= clone -- 'https://github.com/user/repo.git'"
+             git -c safe.bareRepository=explicit -c http.extraHeader= clone \
+             -- 'https://github.com/user/repo.git'"
         );
     }
 
@@ -334,8 +355,8 @@ mod tests {
         assert_eq!(
             cmd,
             "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
-             git -c http.extraHeader= clone --branch 'develop' --depth 1 --single-branch \
-             -- 'git@github.com:user/repo.git' '/opt/repo'"
+             git -c safe.bareRepository=explicit -c http.extraHeader= clone --branch 'develop' \
+             --depth 1 --single-branch -- 'git@github.com:user/repo.git' '/opt/repo'"
         );
     }
 
@@ -347,6 +368,143 @@ mod tests {
             let args: SshGitCloneArgs = serde_json::from_value(v).unwrap();
             let err = GitCloneTool::validate(&args, &test_host_config()).unwrap_err();
             assert!(err.to_string().contains(&format!("'{key}'")), "{err}");
+        }
+    }
+
+    fn clone_args(destination: Option<&str>, url: &str) -> SshGitCloneArgs {
+        let mut v = json!({"host": "s", "url": url});
+        if let Some(d) = destination {
+            v["destination"] = json!(d);
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn test_description_and_schema_state_the_destination_rule() {
+        for needle in [
+            "absolute path",
+            "no component starting with '.'",
+            "derives from the URL must not start with '.'",
+            "whitespace or control character",
+            "asks for confirmation (destructive)",
+            "safe.bareRepository=explicit",
+        ] {
+            assert!(GitCloneTool::DESCRIPTION.contains(needle), "{needle}");
+        }
+        let schema: serde_json::Value = serde_json::from_str(GitCloneTool::SCHEMA).unwrap();
+        let text = schema["properties"]["destination"]["description"]
+            .as_str()
+            .unwrap();
+        for needle in [
+            "absolute path",
+            "'~' is not expanded",
+            "no component starting with '.'",
+            "must not start with '.'",
+            "ssh_exec",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_an_absolute_destination_and_visible_derived_names() {
+        let host = test_host_config();
+        for (destination, url) in [
+            (Some("/srv/repos/name"), "https://git.example.org/o/r.git"),
+            (Some("/opt/r"), "ssh://x/y"),
+            (None, "https://git.example.org/o/r.git"),
+            (None, "git@github.com:user/repo.git"),
+            (Some("/srv/x"), "https://git.example.org/o/.cfg"),
+        ] {
+            GitCloneTool::validate(&clone_args(destination, url), &host)
+                .unwrap_or_else(|e| panic!("{destination:?} {url}: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_validate_refuses_a_relative_destination() {
+        let host = test_host_config();
+        for destination in ["rel", "~/x", "", "./x"] {
+            let err = GitCloneTool::validate(&clone_args(Some(destination), "ssh://x/y"), &host)
+                .unwrap_err();
+            assert!(
+                matches!(err, BridgeError::CommandDenied { .. }),
+                "{destination:?}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "Command denied: 'destination' must be an absolute path (start with '/'): a \
+                 relative path is resolved against the SSH user's home directory and '~' is \
+                 not expanded. Use the full path, for example /srv/repos/name",
+                "{destination:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_refuses_a_hidden_destination_component() {
+        let host = test_host_config();
+        for (destination, component) in [
+            ("/home/u/.ssh", ".ssh"),
+            ("/home/u/.config/git", ".config"),
+            ("/a/../b", ".."),
+            ("/a/./b", "."),
+        ] {
+            let err = GitCloneTool::validate(&clone_args(Some(destination), "ssh://x/y"), &host)
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "Command denied: 'destination' must not contain a component starting with \
+                     '.' ('{component}'): the clone would create or fill hidden configuration \
+                     directories (~/.ssh, ~/.config, ...). Choose a path without hidden \
+                     components; for a hidden target, use ssh_exec"
+                ),
+                "{destination:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_refuses_a_hidden_name_derived_from_the_url() {
+        let host = test_host_config();
+        for (url, derived) in [("https://h/r/.cfg", ".cfg"), ("host:.x", ".x")] {
+            let err = GitCloneTool::validate(&clone_args(None, url), &host).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "Command denied: 'destination' is not set and the directory git derives \
+                     from 'url' ('{derived}') starts with '.': the clone would create a hidden \
+                     directory. Set 'destination' to an absolute path, for example \
+                     /srv/repos/name"
+                ),
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_refuses_the_urls_git_turns_into_a_hidden_name() {
+        // git 2.56 creates `.ssh` for each of these (see `domain::use_cases::git`).
+        let host = test_host_config();
+        for url in [
+            "https://attacker.example/.ssh/ ",
+            "https://attacker.example/.ssh/\t",
+            "https://attacker.example/\u{1}.ssh",
+            "https://x@.ssh",
+        ] {
+            let err = GitCloneTool::validate(&clone_args(None, url), &host).unwrap_err();
+            assert!(
+                matches!(err, BridgeError::CommandDenied { .. }),
+                "{url:?}: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("'destination' is not set"),
+                "{err}"
+            );
+            // With a visible destination the same URLs are fine.
+            GitCloneTool::validate(&clone_args(Some("/srv/x"), url), &host)
+                .unwrap_or_else(|e| panic!("{url:?}: {e}"));
         }
     }
 

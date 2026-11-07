@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 
-use bridge_mcp::AnsibleCommandBuilder;
 use bridge_mcp::domain::use_cases::shell::refuse_option_like;
+use bridge_mcp::domain::yaml::parse_yaml;
+use bridge_mcp::{AnsibleCommandBuilder, Config, validate_config};
 use libfuzzer_sys::fuzz_target;
 
 // The validators of `AnsibleCommandBuilder` are the security boundary of the
@@ -59,6 +60,31 @@ const COMMAND_NAMES: [&str; 8] = [
 /// Other spellings `runs_a_command` is documented to match: collection-
 /// qualified, surrounded by spaces, any case.
 const COMMAND_SPELLINGS: [&str; 3] = ["ansible.builtin.shell", "ANSIBLE.LEGACY.RAW", " Shell "];
+
+/// Ansible's special variable names that do not start with `ansible_`, as the
+/// "Special Variables" page of the Ansible documentation lists them, plus
+/// `delegated_vars`, which the `ssh` connection plugin's `host` option reads
+/// with `inventory_hostname`. Written out here, not taken from the product.
+const SPECIAL_VARIABLES: [&str; 14] = [
+    "delegated_vars",
+    "group_names",
+    "groups",
+    "hostvars",
+    "inventory_dir",
+    "inventory_file",
+    "inventory_hostname",
+    "inventory_hostname_short",
+    "omit",
+    "play_hosts",
+    "playbook_dir",
+    "role_name",
+    "role_names",
+    "role_path",
+];
+
+/// The inventory plugins that parse their source as data. `script` runs it
+/// and `auto` can load a plugin by name; neither may ever be enabled.
+const DATA_PLUGINS: [&str; 4] = ["host_list", "yaml", "ini", "toml"];
 
 /// The `key=` words `parse_kv` keeps as options of a command module.
 const COMMAND_MODULE_OPTIONS: [&str; 3] = ["executable=", "chdir=", "stdin="];
@@ -253,6 +279,163 @@ fn assert_facts_filter_rules(filter: &str) {
     );
 }
 
+/// What an operator-choice check (`accepts(value, allowed)`) must satisfy for
+/// the fuzzed `data`. The properties are about how the verdict MOVES when the
+/// list changes, so they do not restate the comparison they test:
+/// - an empty list refuses everything;
+/// - a list whose entries all differ from `data` (a trimmed, extended,
+///   spliced or re-cased copy of it) refuses it, however the list is ordered;
+/// - add the entry `data` itself and it is accepted, wherever it sits in the
+///   list and whatever else is there;
+/// - and a list holding only `data` accepts nothing but `data`.
+fn assert_exact_choice(arg: &str, data: &str, accepts: impl Fn(&str, &[String]) -> bool) {
+    assert!(
+        !accepts(data, &[]),
+        "{arg} accepted with an empty list: {data:?}"
+    );
+    let upper = data.to_uppercase();
+    let lower = data.to_lowercase();
+    let trimmed = data.trim().to_string();
+    let variants: Vec<String> = [
+        format!("{data} "),
+        format!(" {data}"),
+        format!("{data},x"),
+        format!("x{data}"),
+        format!("{data}/"),
+        format!("{data}/."),
+        upper,
+        lower,
+        trimmed,
+    ]
+    .into_iter()
+    .filter(|variant| variant != data)
+    .collect();
+    assert!(
+        !accepts(data, &variants),
+        "{arg} accepted {data:?} from a list of different spellings: {variants:?}"
+    );
+    let mut reversed = variants.clone();
+    reversed.reverse();
+    assert!(
+        !accepts(data, &reversed),
+        "{arg} verdict depends on the order of the list: {data:?}"
+    );
+    for at in [0, variants.len() / 2, variants.len()] {
+        let mut with_entry = variants.clone();
+        with_entry.insert(at, data.to_string());
+        assert!(
+            accepts(data, &with_entry),
+            "{arg} refused its own entry at position {at}: {data:?}"
+        );
+    }
+    let entry = [data.to_string()];
+    for variant in &variants {
+        assert!(
+            !accepts(variant, &entry),
+            "{arg} choice accepted {variant:?} for the entry {data:?}"
+        );
+    }
+}
+
+/// The inventory plugins `command` enables, from its leading
+/// `ANSIBLE_INVENTORY_ENABLED=` word.
+fn enabled_inventory_plugins(command: &str) -> Vec<&str> {
+    let word = command
+        .strip_prefix("ANSIBLE_INVENTORY_ENABLED=")
+        .unwrap_or_else(|| panic!("no leading inventory assignment in {command:?}"));
+    let first = word.split(' ').next().unwrap_or_default();
+    first.split(',').collect()
+}
+
+/// A command that names `inventory` enables data plugins only, and when the
+/// value holds a `,` (which Ansible reads as a host list, without resolving
+/// it to a path) only `host_list`: that plugin refuses a value naming an
+/// existing path, so a file of that name is parsed by no plugin. The other
+/// data plugins would parse it.
+fn assert_inventory_env_rule(inventory: &str) {
+    let commands = [
+        AnsibleCommandBuilder::build_facts_command("all", None, Some(inventory), false, None),
+        AnsibleCommandBuilder::build_inventory_command(
+            Some(inventory),
+            true,
+            false,
+            None,
+            None,
+            false,
+            false,
+        ),
+    ];
+    for command in commands {
+        let plugins = enabled_inventory_plugins(&command);
+        assert!(
+            !plugins.is_empty() && plugins.iter().all(|p| DATA_PLUGINS.contains(p)),
+            "inventory {inventory:?} enables {plugins:?}"
+        );
+        if inventory.contains(',') {
+            assert_eq!(
+                plugins,
+                ["host_list"],
+                "host list {inventory:?} enables more than host_list"
+            );
+        }
+    }
+}
+
+/// Run `validate_config` on a config whose Ansible lists hold `data`, and
+/// assert what it let through. Whitelist and blacklist are emptied: the
+/// default blacklist is dozens of regexes recompiled per iteration, and
+/// regex validity has nothing to do with this rule.
+fn assert_loader_rules(data: &str) {
+    let list = |key: &str| {
+        let mut ansible = serde_json::Map::new();
+        ansible.insert(key.to_string(), serde_json::json!([data]));
+        let document = serde_json::json!({
+            "hosts": {"h": {
+                "hostname": "e.internal",
+                "user": "u",
+                "auth": {"type": "agent"},
+                "ansible": ansible,
+            }},
+            "security": {"whitelist": [], "blacklist": []},
+        })
+        .to_string();
+        // A string a YAML reader cannot take is refused before the loader
+        // sees it; there is nothing to check then.
+        let config: Config = parse_yaml(&document).ok()?;
+        Some(validate_config(&config).is_ok())
+    };
+    let shared = |entry: &str| {
+        !entry.is_empty()
+            && !entry.chars().any(char::is_control)
+            && !entry.starts_with('-')
+            && !has_jinja(entry)
+    };
+    let plain_absolute = |path: &str| {
+        path.starts_with('/')
+            && !path.ends_with('/')
+            && !path.split('/').any(|segment| segment == "." || segment == "..")
+    };
+
+    if list("inventories") == Some(true) {
+        assert!(shared(data), "inventories entry accepted: {data:?}");
+        if data.contains(',') {
+            assert!(!data.contains('/'), "host list with '/' accepted: {data:?}");
+        } else {
+            assert!(
+                plain_absolute(data) && !data.contains('$') && !data.contains('~'),
+                "inventory path that Ansible could resolve elsewhere accepted: {data:?}"
+            );
+        }
+    }
+    if list("working_dirs") == Some(true) {
+        assert!(shared(data), "working_dirs entry accepted: {data:?}");
+        assert!(
+            plain_absolute(data),
+            "working_dirs entry accepted: {data:?}"
+        );
+    }
+}
+
 fuzz_target!(|data: &str| {
     // 1. Positional arguments that must not be read as an option: a leading
     //    '-' is refused by the shared helper and by every validator that
@@ -440,7 +623,8 @@ fuzz_target!(|data: &str| {
     }
 
     // 9. Playbook extra variables: the key is a plain identifier outside the
-    //    `ansible_` connection variables; the value holds no Jinja.
+    //    `ansible_` connection variables or Ansible's other special variables;
+    //    the value holds no Jinja.
     let by_key = HashMap::from([(data.to_string(), "v".to_string())]);
     if AnsibleCommandBuilder::validate_extra_vars(&by_key).is_ok() {
         let mut chars = data.chars();
@@ -454,6 +638,10 @@ fuzz_target!(|data: &str| {
         assert!(
             !data.starts_with("ansible_"),
             "extra_vars connection variable accepted: {data:?}"
+        );
+        assert!(
+            !SPECIAL_VARIABLES.contains(&data),
+            "extra_vars special variable accepted: {data:?}"
         );
     }
     let by_value = HashMap::from([("k".to_string(), data.to_string())]);
@@ -475,4 +663,27 @@ fuzz_target!(|data: &str| {
             "callback accepted: {data:?}"
         );
     }
+
+    // 11. Values the operator lists in `hosts.<host>.ansible` (inventory,
+    //     remote user, working directory): the match is an exact string
+    //     comparison, so a value gets through only when it IS an entry. An
+    //     empty list refuses everything, and a value that merely contains,
+    //     extends or splices an entry is not that entry.
+    assert_exact_choice("inventory", data, |value, allowed| {
+        AnsibleCommandBuilder::validate_inventory_choice("host", value, allowed).is_ok()
+    });
+    assert_exact_choice("user", data, |value, allowed| {
+        AnsibleCommandBuilder::validate_remote_user_choice("host", value, allowed).is_ok()
+    });
+    assert_exact_choice("working_dir", data, |value, allowed| {
+        AnsibleCommandBuilder::validate_working_dir_choice("host", value, allowed).is_ok()
+    });
+
+    // 12. An inventory that holds a ',' is a host list to Ansible, which does
+    //     not resolve it to a path. Only `host_list` may be enabled for it.
+    assert_inventory_env_rule(data);
+    assert_inventory_env_rule(&format!("{data},"));
+
+    // 13. What the config loader lets into the `hosts.<host>.ansible` lists.
+    assert_loader_rules(data);
 });

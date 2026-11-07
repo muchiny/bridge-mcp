@@ -218,6 +218,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 
@@ -230,6 +231,24 @@ mod tests {
         assert_ne!(cmd, "");
         assert!(cmd.contains("git"));
         assert!(cmd.contains("status"));
+    }
+
+    #[test]
+    fn test_build_command_golden() {
+        let host = test_host_config();
+        let args: SshGitStatusArgs =
+            serde_json::from_value(json!({"host": "s", "path": "/opt/repo"})).unwrap();
+        assert_eq!(
+            GitStatusTool::build_command(&args, &host).unwrap(),
+            "git -C '/opt/repo' -c safe.bareRepository=explicit status"
+        );
+        let args: SshGitStatusArgs =
+            serde_json::from_value(json!({"host": "s", "path": "/opt/repo", "short": true}))
+                .unwrap();
+        assert_eq!(
+            GitStatusTool::build_command(&args, &host).unwrap(),
+            "git -C '/opt/repo' -c safe.bareRepository=explicit status --short"
+        );
     }
 
     fn mock_output(stdout: &str) -> crate::ssh::CommandOutput {
@@ -269,6 +288,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         hosts

@@ -179,6 +179,15 @@ const BEHAVIORAL_DESTRUCTIVE: &[&str] = &[
     "ssh_k3s_upgrade", // re-runs installer, swaps binary, can break the node
     "ssh_helm_repo_remove", // removes repo registration from local config — irreversible without re-adding
     "ssh_k8s_localpath_gc", // apply=true runs rm -rf on orphaned PV host dirs — data cannot be recovered
+    // The three playbook runners execute a whole playbook (arbitrary tasks on the targets).
+    // `recap` and `run_background` were `mutating` until the inventory/connection allow-list fix.
+    "ssh_ansible_playbook",
+    "ssh_ansible_recap",
+    "ssh_ansible_run_background",
+    // A clone fills a directory with files chosen by whoever controls the repository,
+    // anywhere the account can write that is not hidden (maintainer decision 8.0.0:
+    // it asks for confirmation; it was `mutating`).
+    "ssh_git_clone",
 ];
 
 #[test]

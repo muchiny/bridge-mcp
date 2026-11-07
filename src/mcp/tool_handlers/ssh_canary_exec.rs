@@ -258,6 +258,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         };
         let args = SshCanaryExecArgs {
             host: "canary1".to_string(),
@@ -342,6 +343,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 

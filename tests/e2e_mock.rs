@@ -93,6 +93,7 @@ fn build_ctx_with_mode(
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
     hosts.insert(
@@ -127,6 +128,7 @@ fn build_ctx_with_mode(
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 

@@ -59,7 +59,7 @@ impl_common_args!(SshAnsibleRunBackgroundArgs);
 #[mcp_standard_tool(
     name = "ssh_ansible_run_background",
     group = "ansible",
-    annotation = "mutating"
+    annotation = "destructive"
 )]
 pub struct AnsibleRunBackgroundTool;
 
@@ -87,7 +87,7 @@ impl StandardTool for AnsibleRunBackgroundTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'. Must be listed in hosts.<host>.ansible.inventories in config.yaml (exact match); leave it out to use the inventory set in ansible.cfg"
             },
             "limit": {
                 "type": "string",
@@ -134,7 +134,7 @@ impl StandardTool for AnsibleRunBackgroundTool {
             },
             "working_dir": {
                 "type": "string",
-                "description": "Directory to cd into before running"
+                "description": "Directory to cd into before running. Must be listed in hosts.<host>.ansible.working_dirs in config.yaml (exact match), because an ansible.cfg there sets the inventory, the remote user and the keys; leave it out to use absolute paths"
             },
             "vault_password_file": {
                 "type": "string",
@@ -191,11 +191,17 @@ impl StandardTool for AnsibleRunBackgroundTool {
         // message on stderr) instead of a `started` reply for a run that never
         // begins. The playbook command carries the same guards: they run again
         // right before `ansible-playbook` starts.
-        let precheck = AnsibleCommandBuilder::vault_precheck(
+        let mut precheck = AnsibleCommandBuilder::vault_precheck(
             args.working_dir.as_deref(),
             args.vault_password_file.as_deref(),
             args.vault_id.as_deref(),
         );
+        // Same for a host-list inventory whose name a path of the working
+        // directory also has.
+        precheck.push_str(&AnsibleCommandBuilder::host_list_precheck(
+            args.working_dir.as_deref(),
+            args.inventory.as_deref(),
+        ));
 
         // A run ID from the date and the shell's PID. Only `nohup` goes to the
         // background: with `a && b && nohup … &` the whole list did, so the
@@ -207,7 +213,7 @@ impl StandardTool for AnsibleRunBackgroundTool {
         ))
     }
 
-    fn validate(args: &SshAnsibleRunBackgroundArgs, _host_config: &HostConfig) -> Result<()> {
+    fn validate(args: &SshAnsibleRunBackgroundArgs, host_config: &HostConfig) -> Result<()> {
         AnsibleCommandBuilder::validate_playbook_path(&args.playbook)?;
         AnsibleCommandBuilder::refuse_jinja_in(&[
             ("inventory", args.inventory.as_deref()),
@@ -217,6 +223,18 @@ impl StandardTool for AnsibleRunBackgroundTool {
         ])?;
         if let Some(inventory) = args.inventory.as_deref() {
             AnsibleCommandBuilder::validate_inventory(inventory)?;
+            AnsibleCommandBuilder::validate_inventory_choice(
+                &args.host,
+                inventory,
+                host_config.ansible_inventories(),
+            )?;
+        }
+        if let Some(dir) = args.working_dir.as_deref() {
+            AnsibleCommandBuilder::validate_working_dir_choice(
+                &args.host,
+                dir,
+                host_config.ansible_working_dirs(),
+            )?;
         }
         AnsibleCommandBuilder::validate_vault_args(
             args.vault_password_file.as_deref(),
@@ -383,6 +401,19 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
+        }
+    }
+
+    /// `test_host_config()` with the inventories and directory the tests name.
+    fn listed_host_config() -> HostConfig {
+        HostConfig {
+            ansible: Some(crate::config::AnsibleHostConfig {
+                inventories: vec!["hosts.ini".to_string(), "/tmp/inv".to_string()],
+                working_dirs: vec!["/opt/a".to_string()],
+                ..Default::default()
+            }),
+            ..test_host_config()
         }
     }
 
@@ -569,7 +600,7 @@ mod tests {
             "host":"server1","playbook":"site.yml","inventory":"hosts.ini","limit":"web*:!db1","tags":"a,b","skip_tags":"slow"
         }))
         .unwrap();
-        assert!(AnsibleRunBackgroundTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsibleRunBackgroundTool::validate(&ok, &listed_host_config()).is_ok());
     }
 
     fn run_background_args(value: serde_json::Value) -> SshAnsibleRunBackgroundArgs {
@@ -664,6 +695,28 @@ mod tests {
     }
 
     #[test]
+    fn test_host_list_guard_runs_in_the_foreground_before_the_launch() {
+        let args = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml",
+            "inventory": "web1,web2,", "working_dir": "/opt/ansible"
+        }));
+        let cmd = AnsibleRunBackgroundTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(
+            cmd.starts_with(
+                "( cd -- '/opt/ansible' && if [ ! -e 'web1,web2,' ] && [ ! -L 'web1,web2,' ]; then"
+            ),
+            "{cmd}"
+        );
+        assert!(cmd.contains("; fi ) || exit $?; RUN_ID=$(date "), "{cmd}");
+
+        let args = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "/etc/ansible/hosts"
+        }));
+        let cmd = AnsibleRunBackgroundTool::build_command(&args, &test_host_config()).unwrap();
+        assert!(cmd.starts_with("RUN_ID=$(date "), "{cmd}");
+    }
+
+    #[test]
     fn test_dashed_inventory_and_bad_vault_arguments_are_refused() {
         for (field, value) in [
             ("inventory", "-ZQXdash"),
@@ -687,6 +740,168 @@ mod tests {
             "vault_password_file": "/etc/ansible/pass", "vault_id": "prod@/etc/ansible/prod-pass",
             "become_user": "CORP\\svc"
         }));
-        assert!(AnsibleRunBackgroundTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsibleRunBackgroundTool::validate(&ok, &listed_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_unlisted_inventory_is_refused_with_the_allowed_values() {
+        let args = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "evil.example.com,"
+        }));
+        match AnsibleRunBackgroundTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'inventory': 'evil.example.com,' is not one of \
+                 hosts.server1.ansible.inventories ('hosts.ini', '/tmp/inv'). Ansible connects \
+                 to every host the inventory names, with the SSH credentials of the account on \
+                 this control host. Add it to hosts.server1.ansible.inventories in config.yaml, \
+                 or leave 'inventory' out to use the inventory set in ansible.cfg."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unlisted_working_dir_is_refused_with_the_allowed_values() {
+        let args = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml", "working_dir": "/tmp/evil"
+        }));
+        match AnsibleRunBackgroundTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'working_dir': '/tmp/evil' is not one of \
+                 hosts.server1.ansible.working_dirs ('/opt/a'). An ansible.cfg in that directory \
+                 sets the inventory, the remote user, the key and the plugin paths. Add it to \
+                 hosts.server1.ansible.working_dirs in config.yaml, or leave 'working_dir' out \
+                 and use absolute paths."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inventory_and_working_dir_are_refused_without_an_ansible_section() {
+        for (field, key) in [
+            ("inventory", "inventories"),
+            ("working_dir", "working_dirs"),
+        ] {
+            let mut value = json!({"host": "server1", "playbook": "site.yml"});
+            value[field] = json!("/opt/a");
+            let args = run_background_args(value);
+            match AnsibleRunBackgroundTool::validate(&args, &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(
+                        reason.contains(&format!("hosts.server1.ansible.{key}")),
+                        "{reason}"
+                    );
+                    assert!(reason.contains("absent or empty"), "{reason}");
+                }
+                other => panic!("{field}: expected CommandDenied, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_listed_values_and_calls_without_them_pass() {
+        let listed = run_background_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "/tmp/inv",
+            "working_dir": "/opt/a"
+        }));
+        assert!(AnsibleRunBackgroundTool::validate(&listed, &listed_host_config()).is_ok());
+        let bare = run_background_args(json!({"host": "server1", "playbook": "site.yml"}));
+        assert!(AnsibleRunBackgroundTool::validate(&bare, &test_host_config()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unlisted_inventory_is_refused_through_the_handler() {
+        let handler = SshAnsibleRunBackgroundHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "playbook": "site.yml", "inventory": "x,"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.inventories"),
+                    "{reason}"
+                );
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_working_dir_needs_an_exact_match() {
+        let ok = run_background_args(
+            json!({"host": "server1", "playbook": "site.yml", "working_dir": "/opt/a"}),
+        );
+        assert!(AnsibleRunBackgroundTool::validate(&ok, &listed_host_config()).is_ok());
+        for value in [
+            "/opt/a/",
+            "/opt/a/.",
+            "/opt/./a",
+            "/opt/../opt/a",
+            "/opt/a/../a",
+            "//opt/a",
+            "/opt//a",
+            "/OPT/a",
+            "/opt/A",
+            "/opt/a ",
+            " /opt/a",
+            "opt/a",
+            "./opt/a",
+            "~/a",
+            "$HOME/a",
+            "/opt/a:/opt/b",
+            "/opt/ab",
+            "/opt",
+        ] {
+            let args = run_background_args(
+                json!({"host": "server1", "playbook": "site.yml", "working_dir": value}),
+            );
+            assert!(
+                matches!(
+                    AnsibleRunBackgroundTool::validate(&args, &listed_host_config()),
+                    Err(BridgeError::CommandDenied { .. })
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unlisted_working_dir_is_refused_through_the_handler() {
+        let handler = SshAnsibleRunBackgroundHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1", "playbook": "site.yml", "working_dir": "/opt/a"
+                })),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.working_dirs"),
+                    "{reason}"
+                );
+                assert!(reason.contains("absent or empty"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_schema_says_where_the_listed_values_live() {
+        let schema: serde_json::Value =
+            serde_json::from_str(AnsibleRunBackgroundTool::SCHEMA).unwrap();
+        let text = |field: &str| schema["properties"][field]["description"].to_string();
+        assert!(text("inventory").contains("hosts.<host>.ansible.inventories"));
+        assert!(text("working_dir").contains("hosts.<host>.ansible.working_dirs"));
     }
 }

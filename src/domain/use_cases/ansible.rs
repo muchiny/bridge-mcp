@@ -25,7 +25,7 @@ fn write_verbose_flags(cmd: &mut String, level: u8) {
 }
 
 /// Environment assignment put in front of the Ansible program of every
-/// command that names an inventory.
+/// command that names an inventory without a `,`.
 ///
 /// `INVENTORY_ENABLED` defaults to `host_list,script,auto,yaml,ini,toml`, and
 /// the `script` plugin runs any `-i` source the user can execute (every file
@@ -35,10 +35,60 @@ fn write_verbose_flags(cmd: &mut String, level: u8) {
 /// configured inventory applies.
 const INVENTORY_ENV: &str = "ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml";
 
+/// The assignment used instead of [`INVENTORY_ENV`] when the inventory value
+/// holds a `,`, which Ansible reads as a host list.
+///
+/// Ansible does not resolve such a value to a path (`InventoryManager.
+/// parse_sources` and the CLI skip `unfrackpath` when `,` is in the value),
+/// so a file or directory with exactly that name in the working directory is
+/// a way to make the "host list" name an inventory the caller wrote. The
+/// `host_list` plugin refuses it: its `verify_file` is
+/// `not os.path.exists(path) and ',' in path` (ansible-core 2.18,
+/// `plugins/inventory/host_list.py`). With `host_list` the only enabled
+/// plugin, no plugin parses a same-named file or directory, and Ansible
+/// falls back to the implicit `localhost` (`InventoryManager.parse_source`).
+/// The `yaml`, `ini` and `toml` plugins are left out for that reason: they
+/// would parse the file.
+const HOST_LIST_ENV: &str = "ANSIBLE_INVENTORY_ENABLED=host_list";
+
 /// The inventory assignment to put before the program, with its trailing
 /// space, or nothing when the caller named no inventory.
 fn inventory_env(inventory: Option<&str>) -> String {
-    inventory.map_or_else(String::new, |_| format!("{INVENTORY_ENV} "))
+    inventory.map_or_else(String::new, |inv| {
+        let env = if inv.contains(',') {
+            HOST_LIST_ENV
+        } else {
+            INVENTORY_ENV
+        };
+        format!("{env} ")
+    })
+}
+
+/// The shell guard for a host-list inventory (a value holding `,`), or
+/// `None` for any other value.
+///
+/// [`HOST_LIST_ENV`] keeps Ansible from parsing a file or directory named
+/// like the host list, but its vars plugins still read the `group_vars` and
+/// `host_vars` of such a path (inside a directory, or next to a file) for
+/// the implicit `localhost` and the `all` group (`get_vars_from_inventory_sources`
+/// skips a source only when it holds `,` and does not exist). The guard stops
+/// the shell with a message on stderr and exit status 2 when a path of that
+/// name exists (a dangling symlink included), so a host list stays a host
+/// list. It runs in the directory Ansible resolves the value from (after any
+/// `cd` of `working_dir`) and is a compound command with status 0 when it
+/// lets the run go on, so it chains with `&&`.
+fn host_list_guard(inventory: Option<&str>) -> Option<String> {
+    let inv = inventory.filter(|inv| inv.contains(','))?;
+    let word = shell_escape(inv);
+    let message = shell_escape(&format!(
+        "bridge-mcp: inventory {inv} is a host list, but a file or directory of that name \
+         exists in the working directory, and Ansible would read its group_vars and \
+         host_vars; remove it, or list the inventory as an absolute path in \
+         hosts.<host>.ansible.inventories"
+    ));
+    Some(format!(
+        "if [ ! -e {word} ] && [ ! -L {word} ]; then :; else echo {message} >&2; exit 2; fi"
+    ))
 }
 
 /// Vault sources for which Ansible asks the terminal instead of reading a
@@ -140,10 +190,153 @@ fn hex_escape(
     (digits.take(count).filter(char::is_ascii_hexdigit).count() == count).then_some(name)
 }
 
+/// Ansible's special (magic) variable names that do not start with
+/// `ansible_` (those are refused by prefix), sorted.
+///
+/// Ansible sets these itself, and a connection plugin or the inventory may
+/// read them: the `ssh` connection plugin's `host` option takes its value from
+/// the `inventory_hostname` variable, and also from `delegated_vars`.
+///
+/// Sources: "Special Variables" in the Ansible Community Documentation
+/// (<https://docs.ansible.com/ansible/latest/reference_appendices/special_variables.html>,
+/// ansible-core 2.19 era page, read 2026-11-07) lists `group_names`,
+/// `groups`, `hostvars`, `inventory_dir`, `inventory_file`,
+/// `inventory_hostname`, `inventory_hostname_short`, `omit`, `play_hosts`,
+/// `playbook_dir`, `role_name`, `role_names` and `role_path`; the
+/// `options.host.vars` list of `lib/ansible/plugins/connection/ssh.py`
+/// (ansible-core 2.18.0) names `inventory_hostname` and
+/// `delegated_vars['ansible_host']`, hence `delegated_vars`. `environment`,
+/// `vars` and `role_uuid`, which `vars/manager.py` also sets, are not in the
+/// documented list, no connection plugin reads them, and `environment` is a
+/// common name for a deployment stage, so they stay allowed.
+const SPECIAL_VARIABLE_NAMES: &[&str] = &[
+    "delegated_vars",
+    "group_names",
+    "groups",
+    "hostvars",
+    "inventory_dir",
+    "inventory_file",
+    "inventory_hostname",
+    "inventory_hostname_short",
+    "omit",
+    "play_hosts",
+    "playbook_dir",
+    "role_name",
+    "role_names",
+    "role_path",
+];
+
 /// Allowed Ansible stdout callback plugins (whitelist for injection prevention).
 const ALLOWED_CALLBACKS: &[&str] = &[
     "json", "yaml", "dense", "minimal", "tree", "default", "oneline", "debug", "null",
 ];
+
+/// One argument whose value the operator chooses in `hosts.<host>.ansible`.
+struct OperatorChoice {
+    /// The tool argument, as the caller names it.
+    arg: &'static str,
+    /// The key of `hosts.<host>.ansible` that lists the accepted values.
+    key: &'static str,
+    /// What the key lists, for the message that says nothing is configured.
+    noun: &'static str,
+    /// Why the operator, not the caller, picks the value.
+    why: &'static str,
+    /// What a call can do instead of naming a value.
+    instead: &'static str,
+}
+
+const INVENTORY_CHOICE: OperatorChoice = OperatorChoice {
+    arg: "inventory",
+    key: "inventories",
+    noun: "inventory",
+    why: "Ansible connects to every host the inventory names, with the SSH \
+          credentials of the account on this control host.",
+    instead: "leave 'inventory' out to use the inventory set in ansible.cfg",
+};
+
+const REMOTE_USER_CHOICE: OperatorChoice = OperatorChoice {
+    arg: "user",
+    key: "remote_users",
+    noun: "remote user",
+    why: "Ansible logs in to every target as this user, with the SSH \
+          credentials of the account on this control host.",
+    instead: "leave 'user' out to use remote_user from ansible.cfg or the inventory",
+};
+
+const WORKING_DIR_CHOICE: OperatorChoice = OperatorChoice {
+    arg: "working_dir",
+    key: "working_dirs",
+    noun: "working directory",
+    why: "An ansible.cfg in that directory sets the inventory, the remote \
+          user, the key and the plugin paths.",
+    instead: "leave 'working_dir' out and use absolute paths",
+};
+
+/// How many characters of a refused value the message shows.
+const MAX_SHOWN_CHARS: usize = 120;
+
+/// `value` as the refusal message quotes it: escaped with `escape_debug`, so
+/// that a newline or a terminal escape sequence in a caller-given value
+/// cannot reach the audit log or the model as-is, and cut to the first
+/// [`MAX_SHOWN_CHARS`] characters, with the total length said when it is cut.
+fn quote_refused_value(value: &str) -> String {
+    let mut chars = value.chars();
+    let head: String = chars.by_ref().take(MAX_SHOWN_CHARS).collect();
+    let rest = chars.count();
+    let shown = head.escape_debug();
+    if rest == 0 {
+        format!("'{shown}'")
+    } else {
+        format!(
+            "'{shown}' (first {MAX_SHOWN_CHARS} of {} characters)",
+            MAX_SHOWN_CHARS + rest
+        )
+    }
+}
+
+/// Accept `value` only when it equals an entry of `allowed` exactly
+/// (case-sensitive, no trimming, no glob).
+///
+/// The caller's value is quoted by [`quote_refused_value`]: escaped, and cut
+/// at [`MAX_SHOWN_CHARS`] characters.
+fn check_operator_choice(
+    choice: &OperatorChoice,
+    host: &str,
+    value: &str,
+    allowed: &[String],
+) -> Result<()> {
+    if allowed.iter().any(|entry| entry == value) {
+        return Ok(());
+    }
+    let OperatorChoice {
+        arg,
+        key,
+        noun,
+        why,
+        instead,
+    } = choice;
+    let value = quote_refused_value(value);
+    let head = if allowed.is_empty() {
+        format!(
+            "Invalid '{arg}': {value} cannot be used: no {noun} is configured for host \
+             '{host}' (hosts.{host}.ansible.{key} is absent or empty), so a call cannot name one."
+        )
+    } else {
+        let mut list = String::new();
+        for (i, entry) in allowed.iter().enumerate() {
+            if i > 0 {
+                list.push_str(", ");
+            }
+            let _ = write!(list, "'{entry}'");
+        }
+        format!("Invalid '{arg}': {value} is not one of hosts.{host}.ansible.{key} ({list}).")
+    };
+    Err(BridgeError::CommandDenied {
+        reason: format!(
+            "{head} {why} Add it to hosts.{host}.ansible.{key} in config.yaml, or {instead}."
+        ),
+    })
+}
 
 /// Builds Ansible CLI commands for remote execution.
 pub struct AnsibleCommandBuilder;
@@ -160,7 +353,8 @@ impl AnsibleCommandBuilder {
     /// [-b] [--become-user {user}]`
     ///
     /// With an `inventory`, `ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml`
-    /// goes in front of the program: the `script` inventory plugin is off, so
+    /// goes in front of the program (just `ANSIBLE_INVENTORY_ENABLED=host_list`
+    /// when the value holds a `,`): the `script` inventory plugin is off, so
     /// the source is parsed as data and never run. For each caller-given vault
     /// password file (`vault_password_file`, or the source of a `vault_id`
     /// other than a prompt) a shell guard runs first, in the directory
@@ -196,6 +390,9 @@ impl AnsibleCommandBuilder {
         // before Ansible starts. Each guard is a compound command whose status
         // is 0 when it lets the run go on, so the `&&` chain holds.
         for guard in Self::vault_guards(vault_password_file, vault_id) {
+            let _ = write!(cmd, "{guard} && ");
+        }
+        if let Some(guard) = host_list_guard(inventory) {
             let _ = write!(cmd, "{guard} && ");
         }
 
@@ -279,7 +476,8 @@ impl AnsibleCommandBuilder {
     ///
     /// If none of `list`, `graph`, or `host_pattern` is set, defaults to `--list`.
     /// With an `inventory`, `ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml`
-    /// goes in front of the program, so the source is parsed as data and never
+    /// goes in front of the program (just `ANSIBLE_INVENTORY_ENABLED=host_list`
+    /// when the value holds a `,`), so the source is parsed as data and never
     /// run (the `script` plugin is off).
     #[must_use]
     #[expect(clippy::fn_params_excessive_bools)]
@@ -292,7 +490,8 @@ impl AnsibleCommandBuilder {
         yaml: bool,
         vars: bool,
     ) -> String {
-        let mut cmd = inventory_env(inventory);
+        let mut cmd = host_list_guard(inventory).map_or_else(String::new, |g| format!("{g} && "));
+        cmd.push_str(&inventory_env(inventory));
         cmd.push_str("ansible-inventory");
 
         if let Some(inv) = inventory {
@@ -340,7 +539,8 @@ impl AnsibleCommandBuilder {
     /// [-u {user}] [-f {forks}] [-v..vvvv] [-C]`
     ///
     /// With an `inventory`, `ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml`
-    /// goes in front of the program, so the source is parsed as data and never
+    /// goes in front of the program (just `ANSIBLE_INVENTORY_ENABLED=host_list`
+    /// when the value holds a `,`), so the source is parsed as data and never
     /// run. For each caller-given vault password file a shell guard runs first
     /// (see [`Self::vault_guards`]).
     #[must_use]
@@ -362,6 +562,9 @@ impl AnsibleCommandBuilder {
         let mut cmd = String::new();
 
         for guard in Self::vault_guards(vault_password_file, vault_id) {
+            let _ = write!(cmd, "{guard} && ");
+        }
+        if let Some(guard) = host_list_guard(inventory) {
             let _ = write!(cmd, "{guard} && ");
         }
         cmd.push_str(&inventory_env(inventory));
@@ -422,7 +625,8 @@ impl AnsibleCommandBuilder {
     /// [-a "filter={filter}"] [-i {inventory}] [-b] [--become-user {user}]`
     ///
     /// With an `inventory`, `ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml`
-    /// goes in front of the program, so the source is parsed as data and never
+    /// goes in front of the program (just `ANSIBLE_INVENTORY_ENABLED=host_list`
+    /// when the value holds a `,`), so the source is parsed as data and never
     /// run.
     #[must_use]
     pub fn build_facts_command(
@@ -432,7 +636,8 @@ impl AnsibleCommandBuilder {
         use_become: bool,
         become_user: Option<&str>,
     ) -> String {
-        let mut cmd = inventory_env(inventory);
+        let mut cmd = host_list_guard(inventory).map_or_else(String::new, |g| format!("{g} && "));
+        cmd.push_str(&inventory_env(inventory));
 
         let _ = write!(cmd, "ansible {} -m setup", shell_escape(pattern));
 
@@ -542,6 +747,26 @@ impl AnsibleCommandBuilder {
         format!("( {inner} ) || exit $?; ")
     }
 
+    /// The host-list guard (see [`Self::build_playbook_command`]) as a
+    /// foreground prefix for a command that is launched in the background, or
+    /// an empty string when `inventory` is not a host list.
+    ///
+    /// Same shape as [`Self::vault_precheck`]: a subshell, in `working_dir`
+    /// when there is one, and the call ends with its status (2 when a path of
+    /// that name exists) before anything is launched.
+    #[must_use]
+    pub fn host_list_precheck(working_dir: Option<&str>, inventory: Option<&str>) -> String {
+        let Some(guard) = host_list_guard(inventory) else {
+            return String::new();
+        };
+        let mut inner = String::new();
+        if let Some(dir) = working_dir {
+            let _ = write!(inner, "cd -- {} && ", shell_escape(dir));
+        }
+        inner.push_str(&guard);
+        format!("( {inner} ) || exit $?; ")
+    }
+
     /// Validate the `inventory` of a tool that hands it to `-i`.
     ///
     /// A value starting with `-` would be read as an option. (The inventory
@@ -554,6 +779,51 @@ impl AnsibleCommandBuilder {
     /// starts with `-`.
     pub fn validate_inventory(inventory: &str) -> Result<()> {
         super::shell::refuse_option_like("inventory", inventory)
+    }
+
+    /// Check that the `inventory` of a call is one the operator listed in
+    /// `hosts.<host>.ansible.inventories`.
+    ///
+    /// Ansible connects to every host the inventory names, with the SSH
+    /// credentials of the account on the control host. The match is an exact
+    /// string comparison: case-sensitive, no trimming, no glob. An empty
+    /// `allowed` list refuses every value.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BridgeError::CommandDenied` naming `inventory`, the allowed
+    /// values and the migration when `value` is not in `allowed`.
+    pub fn validate_inventory_choice(host: &str, value: &str, allowed: &[String]) -> Result<()> {
+        check_operator_choice(&INVENTORY_CHOICE, host, value, allowed)
+    }
+
+    /// Check that the ad-hoc `user` of a call is one the operator listed in
+    /// `hosts.<host>.ansible.remote_users`.
+    ///
+    /// Same matching rule as [`Self::validate_inventory_choice`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `BridgeError::CommandDenied` naming `user`, the allowed values
+    /// and the migration when `value` is not in `allowed`.
+    pub fn validate_remote_user_choice(host: &str, value: &str, allowed: &[String]) -> Result<()> {
+        check_operator_choice(&REMOTE_USER_CHOICE, host, value, allowed)
+    }
+
+    /// Check that the `working_dir` of a call is one the operator listed in
+    /// `hosts.<host>.ansible.working_dirs`.
+    ///
+    /// An `ansible.cfg` in that directory sets the inventory, the remote user,
+    /// the key and the plugin paths, so leaving it open would bypass the
+    /// inventory list. Same matching rule as
+    /// [`Self::validate_inventory_choice`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `BridgeError::CommandDenied` naming `working_dir`, the allowed
+    /// values and the migration when `value` is not in `allowed`.
+    pub fn validate_working_dir_choice(host: &str, value: &str, allowed: &[String]) -> Result<()> {
+        check_operator_choice(&WORKING_DIR_CHOICE, host, value, allowed)
     }
 
     /// Validate `vault_password_file` and `vault_id`.
@@ -906,7 +1176,9 @@ impl AnsibleCommandBuilder {
     /// The variables are passed to `ansible-playbook -e` as one JSON
     /// document. Keys must be plain identifiers and must not start with
     /// `ansible_` (connection variables such as `ansible_ssh_common_args`
-    /// run local commands); values must not hold a Jinja expression
+    /// run local commands) and must not be one of Ansible's other special
+    /// variable names (`inventory_hostname`, `hostvars`, ...: see
+    /// `SPECIAL_VARIABLE_NAMES`); values must not hold a Jinja expression
     /// (`{{`, `{%`, `{#`), which Ansible would evaluate.
     ///
     /// # Errors
@@ -932,6 +1204,16 @@ impl AnsibleCommandBuilder {
                     reason: format!(
                         "Invalid extra_vars key '{key}': 'ansible_' connection variables \
                          are not allowed"
+                    ),
+                });
+            }
+            if SPECIAL_VARIABLE_NAMES.contains(&key.as_str()) {
+                return Err(BridgeError::CommandDenied {
+                    reason: format!(
+                        "Invalid extra_vars key '{key}': it is one of Ansible's special \
+                         variable names, which Ansible sets itself and a connection plugin \
+                         or the inventory may read (the ssh plugin takes its host from \
+                         'inventory_hostname'). Use another name"
                     ),
                 });
             }
@@ -2009,6 +2291,62 @@ mod tests {
     }
 
     #[test]
+    fn test_extra_vars_refuse_ansible_special_variable_names() {
+        let one = |k: &str| {
+            let mut m = HashMap::new();
+            m.insert(k.to_string(), "v".to_string());
+            AnsibleCommandBuilder::validate_extra_vars(&m)
+        };
+        for &name in SPECIAL_VARIABLE_NAMES {
+            assert_eq!(
+                denied_reason(one(name)),
+                format!(
+                    "Invalid extra_vars key '{name}': it is one of Ansible's special variable \
+                     names, which Ansible sets itself and a connection plugin or the inventory \
+                     may read (the ssh plugin takes its host from 'inventory_hostname'). Use \
+                     another name"
+                )
+            );
+        }
+        // The ssh connection plugin's `host` option reads this one.
+        assert!(denied_reason(one("inventory_hostname")).starts_with("Invalid extra_vars key"));
+        // The list is sorted, so a duplicate or a typo shows.
+        assert!(SPECIAL_VARIABLE_NAMES.windows(2).all(|w| w[0] < w[1]));
+        // Every documented name that is not an `ansible_` one is listed.
+        for name in [
+            "group_names",
+            "groups",
+            "hostvars",
+            "inventory_dir",
+            "inventory_file",
+            "inventory_hostname",
+            "inventory_hostname_short",
+            "omit",
+            "play_hosts",
+            "playbook_dir",
+            "role_name",
+            "role_names",
+            "role_path",
+            "delegated_vars",
+        ] {
+            assert!(SPECIAL_VARIABLE_NAMES.contains(&name), "{name}");
+        }
+        // Near misses are ordinary names: the match is exact.
+        for name in [
+            "inventory_hostnames",
+            "Inventory_hostname",
+            "my_inventory_hostname",
+            "group",
+            "host",
+            "environment",
+            "vars",
+            "role",
+        ] {
+            assert!(one(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
     fn test_option_like_positionals_refused() {
         for r in [
             AnsibleCommandBuilder::validate_pattern("-ZQXdash"),
@@ -2397,6 +2735,163 @@ mod tests {
     }
 
     #[test]
+    fn test_host_list_inventory_enables_only_the_host_list_plugin() {
+        // A value holding ',' is not resolved to a path by Ansible, and the
+        // `host_list` plugin refuses it when a file or directory of that
+        // name exists. No other plugin may be enabled, or a file the caller
+        // created under that name would be parsed as an inventory.
+        let env = "ANSIBLE_INVENTORY_ENABLED=host_list";
+        // And the guard that refuses the run when a path of that name exists,
+        // whose group_vars and host_vars the vars plugins would still read.
+        let guard = "if [ ! -e 'web1,web2,' ] && [ ! -L 'web1,web2,' ]; then :; else echo \
+                     'bridge-mcp: inventory web1,web2, is a host list, but a file or directory \
+                     of that name exists in the working directory, and Ansible would read its \
+                     group_vars and host_vars; remove it, or list the inventory as an absolute \
+                     path in hosts.<host>.ansible.inventories' >&2; exit 2; fi";
+
+        let adhoc = AnsibleCommandBuilder::build_adhoc_command(
+            "all",
+            "ping",
+            None,
+            Some("web1,web2,"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            adhoc,
+            format!("{guard} && {env} ansible 'all' -m 'ping' -i 'web1,web2,'")
+        );
+
+        let facts = AnsibleCommandBuilder::build_facts_command(
+            "all",
+            None,
+            Some("web1,web2,"),
+            false,
+            None,
+        );
+        assert_eq!(
+            facts,
+            format!("{guard} && {env} ansible 'all' -m setup -i 'web1,web2,'")
+        );
+
+        let inventory = AnsibleCommandBuilder::build_inventory_command(
+            Some("web1,web2,"),
+            true,
+            false,
+            None,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(
+            inventory,
+            format!("{guard} && {env} ansible-inventory -i 'web1,web2,' --list")
+        );
+
+        let playbook = AnsibleCommandBuilder::build_playbook_command(
+            "site.yml",
+            Some("web1,web2,"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            false,
+            None,
+            Some("/opt/ansible"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            playbook,
+            format!(
+                "cd -- '/opt/ansible' && {guard} && {env} ansible-playbook 'site.yml' -i 'web1,web2,'"
+            )
+        );
+    }
+
+    #[test]
+    fn test_host_list_precheck_runs_the_guard_in_the_working_directory() {
+        assert_eq!(
+            AnsibleCommandBuilder::host_list_precheck(Some("/opt/a"), Some("/etc/ansible/hosts")),
+            ""
+        );
+        assert_eq!(AnsibleCommandBuilder::host_list_precheck(None, None), "");
+        let pre = AnsibleCommandBuilder::host_list_precheck(Some("/opt/a b"), Some("web1,"));
+        assert!(
+            pre.starts_with("( cd -- '/opt/a b' && if [ ! -e 'web1,' ] && [ ! -L 'web1,' ]; then"),
+            "{pre}"
+        );
+        assert!(pre.ends_with("exit 2; fi ) || exit $?; "), "{pre}");
+        let bare = AnsibleCommandBuilder::host_list_precheck(None, Some("web1,"));
+        assert!(bare.starts_with("( if [ ! -e 'web1,' ]"), "{bare}");
+    }
+
+    #[test]
+    fn test_host_list_guard_stops_the_shell_only_when_the_path_exists() {
+        let dir = std::env::temp_dir().join(format!("bridge-host-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let guard = host_list_guard(Some("web1,web2,")).expect("a host list gets a guard");
+        let run = || {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{guard} && echo ran"))
+                .current_dir(&dir)
+                .output()
+                .expect("sh runs")
+        };
+        let absent = run();
+        assert_eq!(String::from_utf8_lossy(&absent.stdout), "ran\n");
+        std::fs::create_dir(dir.join("web1,web2,")).expect("same-named directory");
+        let present = run();
+        assert_eq!(present.status.code(), Some(2));
+        assert!(
+            present.stdout.is_empty(),
+            "the command after the guard ran: {:?}",
+            present.stdout
+        );
+        assert!(String::from_utf8_lossy(&present.stderr).contains("is a host list"));
+        std::fs::remove_dir(dir.join("web1,web2,")).expect("cleanup");
+        std::os::unix::fs::symlink("/nonexistent", dir.join("web1,web2,")).expect("symlink");
+        assert_eq!(
+            run().status.code(),
+            Some(2),
+            "a dangling symlink is refused too"
+        );
+        std::fs::remove_file(dir.join("web1,web2,")).expect("cleanup");
+        std::fs::remove_dir(&dir).expect("cleanup");
+        assert!(host_list_guard(Some("/etc/ansible/hosts")).is_none());
+        assert!(host_list_guard(None).is_none());
+    }
+
+    #[test]
+    fn test_inventory_env_depends_only_on_a_comma_in_the_value() {
+        let data_plugins = "ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml ";
+        let host_list = "ANSIBLE_INVENTORY_ENABLED=host_list ";
+        for (inventory, expected) in [
+            (None, ""),
+            (Some("/etc/ansible/hosts"), data_plugins),
+            (Some("hosts.ini"), data_plugins),
+            (Some("web1,"), host_list),
+            (Some(",web1"), host_list),
+            (Some("/srv/a,b/hosts"), host_list),
+            (Some(","), host_list),
+        ] {
+            assert_eq!(inventory_env(inventory), expected, "{inventory:?}");
+        }
+    }
+
+    #[test]
     fn test_no_inventory_leaves_the_operator_inventory_alone() {
         let adhoc = AnsibleCommandBuilder::build_adhoc_command(
             "all", "ping", None, None, false, None, None, None, None, false, None, None,
@@ -2727,5 +3222,293 @@ mod tests {
             let err = check(vpf, vid).expect_err(&format!("{vpf:?} {vid:?}"));
             assert!(err.to_string().contains(arg), "{err}");
         }
+    }
+
+    // ============== Operator choices (hosts.<host>.ansible) ==============
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    fn denied_reason(result: Result<()>) -> String {
+        match result {
+            Err(BridgeError::CommandDenied { reason }) => reason,
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_choice_accepts_only_an_exact_entry() {
+        let allowed = strings(&["/etc/ansible/hosts", "web1,web2,"]);
+        for value in ["/etc/ansible/hosts", "web1,web2,"] {
+            assert!(
+                AnsibleCommandBuilder::validate_inventory_choice("ctl", value, &allowed).is_ok(),
+                "{value}"
+            );
+        }
+        for value in [
+            "",
+            "/etc/ansible/HOSTS",
+            "/etc/ansible/hosts ",
+            " /etc/ansible/hosts",
+            "/etc/ansible/hosts/",
+            "/etc/ansible/../ansible/hosts",
+            "/etc/ansible/*",
+            "web1,web2",
+            "web1,web2,evil,",
+            "$HOME",
+            "~/hosts",
+        ] {
+            assert!(
+                AnsibleCommandBuilder::validate_inventory_choice("ctl", value, &allowed).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_choice_with_an_empty_list_refuses_every_value() {
+        for value in ["", "x", "/etc/ansible/hosts"] {
+            assert!(AnsibleCommandBuilder::validate_inventory_choice("ctl", value, &[]).is_err());
+            assert!(AnsibleCommandBuilder::validate_remote_user_choice("ctl", value, &[]).is_err());
+            assert!(AnsibleCommandBuilder::validate_working_dir_choice("ctl", value, &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_working_dir_choice_accepts_only_the_exact_spelling() {
+        let allowed = strings(&["/opt/a", "/srv/ansible"]);
+        for value in ["/opt/a", "/srv/ansible"] {
+            assert!(
+                AnsibleCommandBuilder::validate_working_dir_choice("ctl", value, &allowed).is_ok(),
+                "{value}"
+            );
+        }
+        for value in [
+            "",
+            "/opt/a/",
+            "/opt/a/.",
+            "/opt/./a",
+            "/opt/../opt/a",
+            "/opt/a/../a",
+            "//opt/a",
+            "/opt//a",
+            "/opt/A",
+            "/OPT/a",
+            "/opt/a ",
+            " /opt/a",
+            "/opt/a\n",
+            "opt/a",
+            "./opt/a",
+            "~/a",
+            "$HOME/a",
+            "/opt/a:/srv/ansible",
+            "/opt",
+            "/opt/ab",
+        ] {
+            assert!(
+                AnsibleCommandBuilder::validate_working_dir_choice("ctl", value, &allowed).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_remote_user_choice_accepts_only_the_exact_spelling() {
+        let allowed = strings(&["deploy", "CORP\\svc"]);
+        for value in ["deploy", "CORP\\svc"] {
+            assert!(
+                AnsibleCommandBuilder::validate_remote_user_choice("ctl", value, &allowed).is_ok(),
+                "{value}"
+            );
+        }
+        for value in [
+            "",
+            "Deploy",
+            "deploy ",
+            " deploy",
+            "deploy$",
+            "corp\\svc",
+            "CORP\\SVC",
+            "root",
+        ] {
+            assert!(
+                AnsibleCommandBuilder::validate_remote_user_choice("ctl", value, &allowed).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_refusal_shows_the_caller_value_escaped() {
+        let reason = denied_reason(AnsibleCommandBuilder::validate_inventory_choice(
+            "ctl",
+            "a\nb\x1b[31m\t'q'\"",
+            &strings(&["/etc/ansible/hosts"]),
+        ));
+        assert_eq!(
+            reason,
+            "Invalid 'inventory': 'a\\nb\\u{1b}[31m\\t\\'q\\'\\\"' is not one of \
+             hosts.ctl.ansible.inventories ('/etc/ansible/hosts'). Ansible connects to every \
+             host the inventory names, with the SSH credentials of the account on this control \
+             host. Add it to hosts.ctl.ansible.inventories in config.yaml, or leave \
+             'inventory' out to use the inventory set in ansible.cfg."
+        );
+        assert!(
+            !reason.contains('\n') && !reason.contains('\x1b'),
+            "{reason:?}"
+        );
+    }
+
+    #[test]
+    fn test_refusal_cuts_a_long_caller_value() {
+        let exact = "x".repeat(120);
+        let reason = denied_reason(AnsibleCommandBuilder::validate_working_dir_choice(
+            "ctl",
+            &exact,
+            &[],
+        ));
+        assert!(
+            reason.starts_with(&format!(
+                "Invalid 'working_dir': '{exact}' cannot be used: "
+            )),
+            "{reason}"
+        );
+
+        let long = format!("{}{}", "y".repeat(120), "z".repeat(500));
+        let reason = denied_reason(AnsibleCommandBuilder::validate_working_dir_choice(
+            "ctl",
+            &long,
+            &strings(&["/srv/ansible"]),
+        ));
+        assert_eq!(
+            reason,
+            format!(
+                "Invalid 'working_dir': '{}' (first 120 of 620 characters) is not one of \
+                 hosts.ctl.ansible.working_dirs ('/srv/ansible'). An ansible.cfg in that \
+                 directory sets the inventory, the remote user, the key and the plugin paths. \
+                 Add it to hosts.ctl.ansible.working_dirs in config.yaml, or leave \
+                 'working_dir' out and use absolute paths.",
+                "y".repeat(120)
+            )
+        );
+
+        // The cut is on characters, not bytes, and applies before escaping.
+        let wide = "\u{e9}".repeat(121);
+        let reason = denied_reason(AnsibleCommandBuilder::validate_inventory_choice(
+            "ctl",
+            &wide,
+            &[],
+        ));
+        let shown = format!("'{}' (first 120 of 121 characters)", "\u{e9}".repeat(120));
+        assert!(reason.contains(&shown), "{reason}");
+    }
+
+    #[test]
+    fn test_inventory_choice_refusal_text() {
+        let reason = denied_reason(AnsibleCommandBuilder::validate_inventory_choice(
+            "ctl",
+            "evil.example.com,",
+            &strings(&["/etc/ansible/hosts", "web1,web2,"]),
+        ));
+        assert_eq!(
+            reason,
+            "Invalid 'inventory': 'evil.example.com,' is not one of \
+             hosts.ctl.ansible.inventories ('/etc/ansible/hosts', 'web1,web2,'). Ansible \
+             connects to every host the inventory names, with the SSH credentials of the \
+             account on this control host. Add it to hosts.ctl.ansible.inventories in \
+             config.yaml, or leave 'inventory' out to use the inventory set in ansible.cfg."
+        );
+        let reason = denied_reason(AnsibleCommandBuilder::validate_inventory_choice(
+            "ctl",
+            "evil.example.com,",
+            &[],
+        ));
+        assert_eq!(
+            reason,
+            "Invalid 'inventory': 'evil.example.com,' cannot be used: no inventory is \
+             configured for host 'ctl' (hosts.ctl.ansible.inventories is absent or empty), so a \
+             call cannot name one. Ansible connects to every host the inventory names, with the \
+             SSH credentials of the account on this control host. Add it to \
+             hosts.ctl.ansible.inventories in config.yaml, or leave 'inventory' out to use the \
+             inventory set in ansible.cfg."
+        );
+    }
+
+    #[test]
+    fn test_remote_user_choice_refusal_text() {
+        let reason = denied_reason(AnsibleCommandBuilder::validate_remote_user_choice(
+            "ctl",
+            "root",
+            &strings(&["deploy"]),
+        ));
+        assert_eq!(
+            reason,
+            "Invalid 'user': 'root' is not one of hosts.ctl.ansible.remote_users ('deploy'). \
+             Ansible logs in to every target as this user, with the SSH credentials of the \
+             account on this control host. Add it to hosts.ctl.ansible.remote_users in \
+             config.yaml, or leave 'user' out to use remote_user from ansible.cfg or the \
+             inventory."
+        );
+        let reason = denied_reason(AnsibleCommandBuilder::validate_remote_user_choice(
+            "ctl",
+            "root",
+            &[],
+        ));
+        assert_eq!(
+            reason,
+            "Invalid 'user': 'root' cannot be used: no remote user is configured for host 'ctl' \
+             (hosts.ctl.ansible.remote_users is absent or empty), so a call cannot name one. \
+             Ansible logs in to every target as this user, with the SSH credentials of the \
+             account on this control host. Add it to hosts.ctl.ansible.remote_users in \
+             config.yaml, or leave 'user' out to use remote_user from ansible.cfg or the \
+             inventory."
+        );
+        assert!(
+            AnsibleCommandBuilder::validate_remote_user_choice(
+                "ctl",
+                "deploy",
+                &strings(&["deploy"])
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_working_dir_choice_refusal_text() {
+        let reason = denied_reason(AnsibleCommandBuilder::validate_working_dir_choice(
+            "ctl",
+            "/tmp/evil",
+            &strings(&["/srv/ansible", "/opt/play"]),
+        ));
+        assert_eq!(
+            reason,
+            "Invalid 'working_dir': '/tmp/evil' is not one of hosts.ctl.ansible.working_dirs \
+             ('/srv/ansible', '/opt/play'). An ansible.cfg in that directory sets the \
+             inventory, the remote user, the key and the plugin paths. Add it to \
+             hosts.ctl.ansible.working_dirs in config.yaml, or leave 'working_dir' out and use \
+             absolute paths."
+        );
+        let reason = denied_reason(AnsibleCommandBuilder::validate_working_dir_choice(
+            "ctl",
+            "/tmp/evil",
+            &[],
+        ));
+        assert_eq!(
+            reason,
+            "Invalid 'working_dir': '/tmp/evil' cannot be used: no working directory is \
+             configured for host 'ctl' (hosts.ctl.ansible.working_dirs is absent or empty), so a \
+             call cannot name one. An ansible.cfg in that directory sets the inventory, the \
+             remote user, the key and the plugin paths. Add it to hosts.ctl.ansible.working_dirs \
+             in config.yaml, or leave 'working_dir' out and use absolute paths."
+        );
+        assert!(
+            AnsibleCommandBuilder::validate_working_dir_choice(
+                "ctl",
+                "/srv/ansible",
+                &strings(&["/srv/ansible"])
+            )
+            .is_ok()
+        );
     }
 }

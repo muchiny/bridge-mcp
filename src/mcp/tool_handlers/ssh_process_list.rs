@@ -333,6 +333,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 
@@ -534,6 +535,7 @@ root           1  0.0  0.1  26336 16336 ?        Ss   May25  15:49 /sbin/init\n"
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         hosts

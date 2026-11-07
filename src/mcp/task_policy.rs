@@ -64,8 +64,10 @@
 ///   window and the host count, structurally.
 ///
 /// Deliberately NOT here, and the refusals matter as much as the entries:
-/// `ssh_runbook_execute`, `ssh_ansible_adhoc` and `ssh_ansible_playbook` are
-/// annotated `destructive` (rule 2); `ssh_exec_multi` is long only by accident
+/// `ssh_runbook_execute`, `ssh_ansible_adhoc`, `ssh_ansible_playbook`,
+/// `ssh_ansible_recap` and `ssh_ansible_run_background` are annotated
+/// `destructive` (rule 2; the last two run a whole playbook, like
+/// `ssh_ansible_playbook`); `ssh_exec_multi` is long only by accident
 /// (rule 1); `ssh_security_audit`, `ssh_incident_triage`, `ssh_k8s_triage` and
 /// `ssh_port_scan` are all plausible read-only candidates held in reserve —
 /// three entries are easier to defend than eight.

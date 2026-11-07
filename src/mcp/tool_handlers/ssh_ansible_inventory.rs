@@ -66,7 +66,7 @@ impl StandardTool for AnsibleInventoryTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'. Must be listed in hosts.<host>.ansible.inventories in config.yaml (exact match); leave it out to use the inventory set in ansible.cfg"
             },
             "list": {
                 "type": "boolean",
@@ -125,9 +125,14 @@ impl StandardTool for AnsibleInventoryTool {
         ))
     }
 
-    fn validate(args: &SshAnsibleInventoryArgs, _host_config: &HostConfig) -> Result<()> {
+    fn validate(args: &SshAnsibleInventoryArgs, host_config: &HostConfig) -> Result<()> {
         if let Some(inventory) = args.inventory.as_deref() {
             AnsibleCommandBuilder::validate_inventory(inventory)?;
+            AnsibleCommandBuilder::validate_inventory_choice(
+                &args.host,
+                inventory,
+                host_config.ansible_inventories(),
+            )?;
         }
         if let Some(group) = args.group.as_deref() {
             crate::domain::use_cases::shell::refuse_option_like("group", group)?;
@@ -339,6 +344,20 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
+        }
+    }
+
+    /// `test_host_config()` with the inventories the tests name.
+    fn listed_host_config() -> HostConfig {
+        HostConfig {
+            ansible: Some(crate::config::AnsibleHostConfig {
+                inventories: ["/etc/ansible/hosts", "/tmp/inv"]
+                    .map(String::from)
+                    .to_vec(),
+                ..Default::default()
+            }),
+            ..test_host_config()
         }
     }
 
@@ -466,6 +485,75 @@ mod tests {
             json!({"host":"server1","list":true,"inventory":"/etc/ansible/hosts"}),
         )
         .unwrap();
-        assert!(AnsibleInventoryTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsibleInventoryTool::validate(&ok, &listed_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_unlisted_inventory_is_refused_with_the_allowed_values() {
+        let args: SshAnsibleInventoryArgs = serde_json::from_value(
+            json!({"host": "server1", "list": true, "inventory": "evil.example.com,"}),
+        )
+        .unwrap();
+        match AnsibleInventoryTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'inventory': 'evil.example.com,' is not one of \
+                 hosts.server1.ansible.inventories ('/etc/ansible/hosts', '/tmp/inv'). \
+                 Ansible connects to every host the inventory names, with the SSH credentials of \
+                 the account on this control host. Add it to hosts.server1.ansible.inventories \
+                 in config.yaml, or leave 'inventory' out to use the inventory set in \
+                 ansible.cfg."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inventory_is_refused_without_an_ansible_section_and_absent_one_passes() {
+        let args: SshAnsibleInventoryArgs = serde_json::from_value(
+            json!({"host": "server1", "list": true, "inventory": "hosts.ini"}),
+        )
+        .unwrap();
+        match AnsibleInventoryTool::validate(&args, &test_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.inventories"),
+                    "{reason}"
+                );
+                assert!(reason.contains("absent or empty"), "{reason}");
+            }
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+        let bare: SshAnsibleInventoryArgs =
+            serde_json::from_value(json!({"host": "server1", "list": true})).unwrap();
+        assert!(AnsibleInventoryTool::validate(&bare, &test_host_config()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unlisted_inventory_is_refused_through_the_handler() {
+        let handler = SshAnsibleInventoryHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "list": true, "inventory": "x,"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.inventories"),
+                    "{reason}"
+                );
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_schema_says_where_the_listed_values_live() {
+        let schema: serde_json::Value = serde_json::from_str(AnsibleInventoryTool::SCHEMA).unwrap();
+        let text = schema["properties"]["inventory"]["description"].to_string();
+        assert!(text.contains("hosts.<host>.ansible.inventories"));
     }
 }

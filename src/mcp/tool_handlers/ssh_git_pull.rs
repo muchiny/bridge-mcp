@@ -256,6 +256,7 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 
@@ -275,7 +276,7 @@ mod tests {
         assert_eq!(
             cmd,
             "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
-             git -C '/opt/repo' -c http.extraHeader= pull"
+             git -C '/opt/repo' -c safe.bareRepository=explicit -c http.extraHeader= pull"
         );
     }
 
@@ -290,7 +291,8 @@ mod tests {
         assert_eq!(
             cmd,
             "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && \
-             git -C '/opt/repo' -c http.extraHeader= pull --rebase --ff-only -- 'origin' 'main'"
+             git -C '/opt/repo' -c safe.bareRepository=explicit -c http.extraHeader= \
+             pull --rebase --ff-only -- 'origin' 'main'"
         );
     }
 
@@ -331,6 +333,7 @@ mod tests {
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         hosts

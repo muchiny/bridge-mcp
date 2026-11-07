@@ -55,7 +55,11 @@ pub struct SshAnsibleRecapArgs {
 
 impl_common_args!(SshAnsibleRecapArgs);
 
-#[mcp_standard_tool(name = "ssh_ansible_recap", group = "ansible", annotation = "mutating")]
+#[mcp_standard_tool(
+    name = "ssh_ansible_recap",
+    group = "ansible",
+    annotation = "destructive"
+)]
 pub struct AnsibleRecapTool;
 
 impl StandardTool for AnsibleRecapTool {
@@ -81,7 +85,7 @@ impl StandardTool for AnsibleRecapTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'. Must be listed in hosts.<host>.ansible.inventories in config.yaml (exact match); leave it out to use the inventory set in ansible.cfg"
             },
             "limit": {
                 "type": "string",
@@ -122,7 +126,7 @@ impl StandardTool for AnsibleRecapTool {
             },
             "working_dir": {
                 "type": "string",
-                "description": "Directory to cd into before running"
+                "description": "Directory to cd into before running. Must be listed in hosts.<host>.ansible.working_dirs in config.yaml (exact match), because an ansible.cfg there sets the inventory, the remote user and the keys; leave it out to use absolute paths"
             },
             "vault_password_file": {
                 "type": "string",
@@ -178,7 +182,7 @@ impl StandardTool for AnsibleRecapTool {
         ))
     }
 
-    fn validate(args: &SshAnsibleRecapArgs, _host_config: &HostConfig) -> Result<()> {
+    fn validate(args: &SshAnsibleRecapArgs, host_config: &HostConfig) -> Result<()> {
         AnsibleCommandBuilder::validate_playbook_path(&args.playbook)?;
         AnsibleCommandBuilder::refuse_jinja_in(&[
             ("inventory", args.inventory.as_deref()),
@@ -188,6 +192,18 @@ impl StandardTool for AnsibleRecapTool {
         ])?;
         if let Some(inventory) = args.inventory.as_deref() {
             AnsibleCommandBuilder::validate_inventory(inventory)?;
+            AnsibleCommandBuilder::validate_inventory_choice(
+                &args.host,
+                inventory,
+                host_config.ansible_inventories(),
+            )?;
+        }
+        if let Some(dir) = args.working_dir.as_deref() {
+            AnsibleCommandBuilder::validate_working_dir_choice(
+                &args.host,
+                dir,
+                host_config.ansible_working_dirs(),
+            )?;
         }
         AnsibleCommandBuilder::validate_vault_args(
             args.vault_password_file.as_deref(),
@@ -405,6 +421,19 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
+        }
+    }
+
+    /// `test_host_config()` with the inventories and directory the tests name.
+    fn listed_host_config() -> HostConfig {
+        HostConfig {
+            ansible: Some(crate::config::AnsibleHostConfig {
+                inventories: vec!["hosts.ini".to_string(), "/tmp/inv".to_string()],
+                working_dirs: vec!["/opt/a".to_string()],
+                ..Default::default()
+            }),
+            ..test_host_config()
         }
     }
 
@@ -618,7 +647,7 @@ mod tests {
             "host":"server1","playbook":"site.yml","inventory":"hosts.ini","limit":"web*:!db1","tags":"a,b","skip_tags":"slow"
         }))
         .unwrap();
-        assert!(AnsibleRecapTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsibleRecapTool::validate(&ok, &listed_host_config()).is_ok());
     }
 
     fn recap_args(value: serde_json::Value) -> SshAnsibleRecapArgs {
@@ -651,7 +680,7 @@ mod tests {
             "host": "server1", "playbook": "site.yml", "working_dir": "/opt/a",
             "vault_password_file": "/etc/ansible/pass", "vault_id": "prod@/etc/ansible/prod-pass"
         }));
-        assert!(AnsibleRecapTool::validate(&args, &test_host_config()).is_ok());
+        assert!(AnsibleRecapTool::validate(&args, &listed_host_config()).is_ok());
         let cmd = AnsibleRecapTool::build_command(&args, &test_host_config()).unwrap();
         assert!(
             cmd.starts_with("cd -- '/opt/a' && if [ -f '/etc/ansible/pass' ] && [ -n \"$(find -L "),
@@ -700,5 +729,164 @@ mod tests {
             "host": "server1", "playbook": "site.yml", "become_user": "CORP\\svc$"
         }));
         assert!(AnsibleRecapTool::validate(&ok, &test_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_unlisted_inventory_is_refused_with_the_allowed_values() {
+        let args = recap_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "evil.example.com,"
+        }));
+        match AnsibleRecapTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'inventory': 'evil.example.com,' is not one of \
+                 hosts.server1.ansible.inventories ('hosts.ini', '/tmp/inv'). Ansible connects \
+                 to every host the inventory names, with the SSH credentials of the account on \
+                 this control host. Add it to hosts.server1.ansible.inventories in config.yaml, \
+                 or leave 'inventory' out to use the inventory set in ansible.cfg."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unlisted_working_dir_is_refused_with_the_allowed_values() {
+        let args = recap_args(json!({
+            "host": "server1", "playbook": "site.yml", "working_dir": "/tmp/evil"
+        }));
+        match AnsibleRecapTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'working_dir': '/tmp/evil' is not one of \
+                 hosts.server1.ansible.working_dirs ('/opt/a'). An ansible.cfg in that directory \
+                 sets the inventory, the remote user, the key and the plugin paths. Add it to \
+                 hosts.server1.ansible.working_dirs in config.yaml, or leave 'working_dir' out \
+                 and use absolute paths."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inventory_and_working_dir_are_refused_without_an_ansible_section() {
+        for (field, key) in [
+            ("inventory", "inventories"),
+            ("working_dir", "working_dirs"),
+        ] {
+            let mut value = json!({"host": "server1", "playbook": "site.yml"});
+            value[field] = json!("/opt/a");
+            match AnsibleRecapTool::validate(&recap_args(value), &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(
+                        reason.contains(&format!("hosts.server1.ansible.{key}")),
+                        "{reason}"
+                    );
+                    assert!(reason.contains("absent or empty"), "{reason}");
+                }
+                other => panic!("{field}: expected CommandDenied, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_listed_values_and_calls_without_them_pass() {
+        let listed = recap_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "/tmp/inv",
+            "working_dir": "/opt/a"
+        }));
+        assert!(AnsibleRecapTool::validate(&listed, &listed_host_config()).is_ok());
+        let bare = recap_args(json!({"host": "server1", "playbook": "site.yml"}));
+        assert!(AnsibleRecapTool::validate(&bare, &test_host_config()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unlisted_inventory_is_refused_through_the_handler() {
+        let handler = SshAnsibleRecapHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "playbook": "site.yml", "inventory": "x,"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.inventories"),
+                    "{reason}"
+                );
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_working_dir_needs_an_exact_match() {
+        let ok =
+            recap_args(json!({"host": "server1", "playbook": "site.yml", "working_dir": "/opt/a"}));
+        assert!(AnsibleRecapTool::validate(&ok, &listed_host_config()).is_ok());
+        for value in [
+            "/opt/a/",
+            "/opt/a/.",
+            "/opt/./a",
+            "/opt/../opt/a",
+            "/opt/a/../a",
+            "//opt/a",
+            "/opt//a",
+            "/OPT/a",
+            "/opt/A",
+            "/opt/a ",
+            " /opt/a",
+            "opt/a",
+            "./opt/a",
+            "~/a",
+            "$HOME/a",
+            "/opt/a:/opt/b",
+            "/opt/ab",
+            "/opt",
+        ] {
+            let args = recap_args(
+                json!({"host": "server1", "playbook": "site.yml", "working_dir": value}),
+            );
+            assert!(
+                matches!(
+                    AnsibleRecapTool::validate(&args, &listed_host_config()),
+                    Err(BridgeError::CommandDenied { .. })
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unlisted_working_dir_is_refused_through_the_handler() {
+        let handler = SshAnsibleRecapHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1", "playbook": "site.yml", "working_dir": "/opt/a"
+                })),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.working_dirs"),
+                    "{reason}"
+                );
+                assert!(reason.contains("absent or empty"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_schema_says_where_the_listed_values_live() {
+        let schema: serde_json::Value = serde_json::from_str(AnsibleRecapTool::SCHEMA).unwrap();
+        let text = |field: &str| schema["properties"][field]["description"].to_string();
+        assert!(text("inventory").contains("hosts.<host>.ansible.inventories"));
+        assert!(text("working_dir").contains("hosts.<host>.ansible.working_dirs"));
     }
 }

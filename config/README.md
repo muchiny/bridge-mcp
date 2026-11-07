@@ -154,6 +154,71 @@ hosts:
       path: ~/.ssh/id_ed25519
 ```
 
+## Ansible Control Hosts
+
+The Ansible tools connect to every host an inventory names, with the SSH
+credentials of the account on the control host, and an `ansible.cfg` in the
+working directory can set the inventory, the remote user and the keys. So the
+operator, not the caller, chooses these values. Under `hosts.<alias>.ansible`,
+list what a call may name when that host is the control host:
+
+```yaml
+hosts:
+  ansible-control:
+    hostname: 192.168.1.101
+    user: ansible
+    auth:
+      type: key
+      path: ~/.ssh/id_ed25519
+    ansible:
+      inventories:
+        - /etc/ansible/hosts
+        - /srv/ansible/inventories/prod.ini
+      remote_users:
+        - deploy
+      working_dirs:
+        - /srv/ansible/playbooks
+```
+
+| Key | Used by | What a call may pass |
+|---|---|---|
+| `inventories` | the `inventory` of `ssh_ansible_playbook`, `ssh_ansible_recap`, `ssh_ansible_run_background`, `ssh_ansible_adhoc`, `ssh_ansible_facts` and `ssh_ansible_inventory` | One of the listed strings: an absolute path (file or directory) or a `host1,host2,` list |
+| `remote_users` | the `user` of `ssh_ansible_adhoc` | One of the listed user names |
+| `working_dirs` | the `working_dir` of `ssh_ansible_playbook`, `ssh_ansible_recap` and `ssh_ansible_run_background` | One of the listed absolute directories |
+
+- A value in a call must be equal to an entry: same case, no trimming, no
+  glob, no expansion of `~` or `$VAR`. A value that only resolves to an entry
+  is refused. The refusal names the allowed values and shows the value of the
+  call escaped and cut to its first 120 characters.
+- A missing `ansible:` section, a missing key and an empty list all mean the
+  same thing: a call cannot give that argument. A call that leaves the
+  argument out is unaffected, and Ansible then uses what `ansible.cfg` sets
+  (inventory, `remote_user`).
+- In every list an entry must not be empty, hold a control character, start
+  with `-` or hold a Jinja delimiter (`{{`, `{%`, `{#`). On top of that:
+  - a `remote_users` entry must be a valid user name;
+  - a `working_dirs` entry must be an absolute path with no `.` or `..`
+    segment and no trailing `/`;
+  - an `inventories` entry that holds `,` is a host list and must not hold
+    `/`; the commands then enable only the `host_list` inventory plugin, so a
+    file named like the list is not read as an inventory (`web1,web2,`,
+    `10.0.0.1,`);
+  - any other `inventories` entry is a path: absolute, with no `$`, no `~`, no
+    `.` or `..` segment and no trailing `/`, because Ansible expands `$VAR`
+    and `~` and joins a relative path to the current directory (`hosts.ini`
+    and `~/hosts.ini` are refused).
+
+  A bad entry stops the configuration from loading, with the key named.
+- An unknown key under `ansible:` is rejected.
+- Inventory files and working directories you list must exist and must not
+  be writable by the SSH account or by other tools of the bridge (for example
+  `ssh_file_write`): a playbook or `ansible.cfg` the caller can write there is
+  still code for Ansible. An entry that is listed is trusted as written.
+- The lists do not cover a call that passes the bridge `sudo` or `sudo_user`
+  (Ansible then runs as that account, with its SSH keys, `ssh_config` and
+  `ansible.cfg`), nor the AWX tools (`ssh_awx_*`), which AWX governs. See
+  `SECURITY.md`.
+
 ## Security Modes
 
 - **strict** (default): Only whitelisted commands are allowed. Blacklist is checked first.
@@ -333,6 +398,7 @@ The configuration file is validated on load:
 - `hostname` and `user` must not be empty
 - SSH key files must exist (for key auth)
 - Regex patterns must be valid (invalid patterns are skipped with a warning)
+- Entries of `hosts.<alias>.ansible` must be acceptable values (see [Ansible Control Hosts](#ansible-control-hosts))
 
 ## Testing
 

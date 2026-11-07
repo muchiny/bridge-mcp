@@ -28,6 +28,33 @@ hosts:
     auth:
       type: key
       path: ~/.ssh/id_ed25519_awx
+    # Ansible tools on this host (it is their control host): the operator,
+    # not the caller, chooses where Ansible connects and with which
+    # configuration. A value a call passes as `inventory` (ssh_ansible_playbook,
+    # _recap, _run_background, _adhoc, _facts, _inventory), as the `user` of
+    # ssh_ansible_adhoc, or as the `working_dir` of ssh_ansible_playbook,
+    # _recap and _run_background must be EQUAL to an entry below (exact string,
+    # case-sensitive, no glob, no ~ or $VAR expansion). A missing section or an
+    # empty list refuses the argument; a call that omits it is unaffected and
+    # uses ansible.cfg. Entries, all lists: no empty value, no control
+    # character, no leading "-", no Jinja. remote_users: valid user names.
+    # working_dirs: absolute, no "." or ".." segment, no trailing "/".
+    # inventories: an entry with "," is a host list (web1,web2,) and holds no
+    # "/"; any other is a path, absolute, no "$", no "~", no "." or ".."
+    # segment, no trailing "/".
+    # List only paths that exist. Do not list a file or directory that the SSH
+    # account or another bridge tool (ssh_file_write...) can write: a
+    # playbook or ansible.cfg a caller can write is still code for Ansible.
+    # These lists do not apply to the bridge sudo/sudo_user parameters (Ansible
+    # then runs as that account) nor to the AWX tools.
+    # ansible:
+    #   inventories:
+    #     - /etc/ansible/hosts
+    #     - /srv/ansible/inventories/prod.ini
+    #   remote_users:
+    #     - deploy
+    #   working_dirs:
+    #     - /srv/ansible/playbooks
 
   # Example: Bastion/Jump host
   bastion:
@@ -183,8 +210,12 @@ security:
     - "^systemctl\\s+(status|list-units|is-active).*"
 
     # Git commands
-    # ssh_git_clone and ssh_git_pull start with
+    # The typed git tools (ssh_git_*) build their own command and check the
+    # blacklist only, so this pattern matters for ssh_exec. ssh_git_clone and
+    # ssh_git_pull start with
     # "unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && git ..."
+    # and every ssh_git_* command carries "-c safe.bareRepository=explicit"
+    # after "git" (clone) or "git -C PATH" (the others).
     - "^(unset GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CERT_PASSWORD_PROTECTED && )?git\\s+(status|log|branch|remote|diff|pull|clone|checkout).*"
 
     # File viewing (specific paths)

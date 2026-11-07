@@ -58,6 +58,7 @@ fn denying_config(path: std::path::PathBuf) -> Config {
             winrm_operation_timeout_secs: None,
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
 

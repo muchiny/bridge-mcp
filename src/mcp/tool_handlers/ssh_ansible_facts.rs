@@ -69,7 +69,7 @@ impl StandardTool for AnsibleFactsTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'. Must be listed in hosts.<host>.ansible.inventories in config.yaml (exact match); leave it out to use the inventory set in ansible.cfg"
             },
             "become": {
                 "type": "boolean",
@@ -111,7 +111,7 @@ impl StandardTool for AnsibleFactsTool {
         ))
     }
 
-    fn validate(args: &SshAnsibleFactsArgs, _host_config: &HostConfig) -> Result<()> {
+    fn validate(args: &SshAnsibleFactsArgs, host_config: &HostConfig) -> Result<()> {
         AnsibleCommandBuilder::validate_pattern(&args.pattern)?;
         AnsibleCommandBuilder::refuse_jinja_in(&[
             ("pattern", Some(args.pattern.as_str())),
@@ -119,6 +119,11 @@ impl StandardTool for AnsibleFactsTool {
         ])?;
         if let Some(inventory) = args.inventory.as_deref() {
             AnsibleCommandBuilder::validate_inventory(inventory)?;
+            AnsibleCommandBuilder::validate_inventory_choice(
+                &args.host,
+                inventory,
+                host_config.ansible_inventories(),
+            )?;
         }
         if let Some(filter) = args.filter.as_deref() {
             AnsibleCommandBuilder::validate_facts_filter(filter)?;
@@ -316,6 +321,20 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
+        }
+    }
+
+    /// `test_host_config()` with the inventories the tests name.
+    fn listed_host_config() -> HostConfig {
+        HostConfig {
+            ansible: Some(crate::config::AnsibleHostConfig {
+                inventories: ["hosts.ini", "./-hosts,", "/tmp/inv"]
+                    .map(String::from)
+                    .to_vec(),
+                ..Default::default()
+            }),
+            ..test_host_config()
         }
     }
 
@@ -511,7 +530,7 @@ mod tests {
             json!({"host":"server1","pattern":"web*:!db1","inventory":"hosts.ini"}),
         )
         .unwrap();
-        assert!(AnsibleFactsTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsibleFactsTool::validate(&ok, &listed_host_config()).is_ok());
     }
 
     #[test]
@@ -547,7 +566,7 @@ mod tests {
             json!({"host":"server1","pattern":"all","inventory":"./-hosts,"}),
         )
         .unwrap();
-        assert!(AnsibleFactsTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsibleFactsTool::validate(&ok, &listed_host_config()).is_ok());
     }
 
     #[test]
@@ -567,5 +586,74 @@ mod tests {
         )
         .unwrap();
         assert!(AnsibleFactsTool::validate(&bad, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_unlisted_inventory_is_refused_with_the_allowed_values() {
+        let args: SshAnsibleFactsArgs = serde_json::from_value(
+            json!({"host": "server1", "pattern": "all", "inventory": "evil.example.com,"}),
+        )
+        .unwrap();
+        match AnsibleFactsTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'inventory': 'evil.example.com,' is not one of \
+                 hosts.server1.ansible.inventories ('hosts.ini', './-hosts,', '/tmp/inv'). \
+                 Ansible connects to every host the inventory names, with the SSH credentials of \
+                 the account on this control host. Add it to hosts.server1.ansible.inventories \
+                 in config.yaml, or leave 'inventory' out to use the inventory set in \
+                 ansible.cfg."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inventory_is_refused_without_an_ansible_section_and_absent_one_passes() {
+        let args: SshAnsibleFactsArgs = serde_json::from_value(
+            json!({"host": "server1", "pattern": "all", "inventory": "hosts.ini"}),
+        )
+        .unwrap();
+        match AnsibleFactsTool::validate(&args, &test_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.inventories"),
+                    "{reason}"
+                );
+                assert!(reason.contains("absent or empty"), "{reason}");
+            }
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+        let bare: SshAnsibleFactsArgs =
+            serde_json::from_value(json!({"host": "server1", "pattern": "all"})).unwrap();
+        assert!(AnsibleFactsTool::validate(&bare, &test_host_config()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unlisted_inventory_is_refused_through_the_handler() {
+        let handler = SshAnsibleFactsHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "pattern": "all", "inventory": "x,"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.inventories"),
+                    "{reason}"
+                );
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_schema_says_where_the_listed_values_live() {
+        let schema: serde_json::Value = serde_json::from_str(AnsibleFactsTool::SCHEMA).unwrap();
+        let text = schema["properties"]["inventory"]["description"].to_string();
+        assert!(text.contains("hosts.<host>.ansible.inventories"));
     }
 }

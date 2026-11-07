@@ -55,6 +55,7 @@ fn create_config_with_host() -> Config {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         },
     );
     Config {

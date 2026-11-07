@@ -385,6 +385,7 @@ tmpfs          tmpfs     1.6G  166M  1.5G  11% /run
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
         }
     }
 
@@ -469,6 +470,7 @@ tmpfs          tmpfs     1.6G  166M  1.5G  11% /run
                 winrm_operation_timeout_secs: None,
                 #[cfg(feature = "winrm")]
                 winrm_max_envelope_size: None,
+                ansible: None,
             },
         );
         hosts

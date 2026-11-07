@@ -94,7 +94,7 @@ impl StandardTool for AnsiblePlaybookTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'. Must be listed in hosts.<host>.ansible.inventories in config.yaml (exact match); leave it out to use the inventory set in ansible.cfg"
             },
             "limit": {
                 "type": "string",
@@ -141,7 +141,7 @@ impl StandardTool for AnsiblePlaybookTool {
             },
             "working_dir": {
                 "type": "string",
-                "description": "Directory to cd into before running"
+                "description": "Directory to cd into before running. Must be listed in hosts.<host>.ansible.working_dirs in config.yaml (exact match), because an ansible.cfg there sets the inventory, the remote user and the keys; leave it out to use absolute paths"
             },
             "callback": {
                 "type": "string",
@@ -245,7 +245,7 @@ impl StandardTool for AnsiblePlaybookTool {
         std::future::ready(Ok(result))
     }
 
-    fn validate(args: &SshAnsiblePlaybookArgs, _host_config: &HostConfig) -> Result<()> {
+    fn validate(args: &SshAnsiblePlaybookArgs, host_config: &HostConfig) -> Result<()> {
         AnsibleCommandBuilder::validate_playbook_path(&args.playbook)?;
         AnsibleCommandBuilder::refuse_jinja_in(&[
             ("inventory", args.inventory.as_deref()),
@@ -255,6 +255,18 @@ impl StandardTool for AnsiblePlaybookTool {
         ])?;
         if let Some(inventory) = args.inventory.as_deref() {
             AnsibleCommandBuilder::validate_inventory(inventory)?;
+            AnsibleCommandBuilder::validate_inventory_choice(
+                &args.host,
+                inventory,
+                host_config.ansible_inventories(),
+            )?;
+        }
+        if let Some(dir) = args.working_dir.as_deref() {
+            AnsibleCommandBuilder::validate_working_dir_choice(
+                &args.host,
+                dir,
+                host_config.ansible_working_dirs(),
+            )?;
         }
         AnsibleCommandBuilder::validate_vault_args(
             args.vault_password_file.as_deref(),
@@ -538,6 +550,19 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
+        }
+    }
+
+    /// `test_host_config()` with the inventories and directory the tests name.
+    fn listed_host_config() -> HostConfig {
+        HostConfig {
+            ansible: Some(crate::config::AnsibleHostConfig {
+                inventories: vec!["hosts.ini".to_string(), "/tmp/inv".to_string()],
+                working_dirs: vec!["/opt/a".to_string()],
+                ..Default::default()
+            }),
+            ..test_host_config()
         }
     }
 
@@ -821,7 +846,7 @@ mod tests {
             "host":"server1","playbook":"site.yml","inventory":"hosts.ini","limit":"web*:!db1","tags":"a,b","skip_tags":"slow"
         }))
         .unwrap();
-        assert!(AnsiblePlaybookTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsiblePlaybookTool::validate(&ok, &listed_host_config()).is_ok());
     }
 
     fn playbook_args(value: serde_json::Value) -> SshAnsiblePlaybookArgs {
@@ -852,7 +877,7 @@ mod tests {
             "host": "server1", "playbook": "site.yml", "working_dir": "/opt/a",
             "vault_password_file": "pass.txt", "vault_id": "prod@keys/prod-pass"
         }));
-        assert!(AnsiblePlaybookTool::validate(&args, &test_host_config()).is_ok());
+        assert!(AnsiblePlaybookTool::validate(&args, &listed_host_config()).is_ok());
         let cmd = AnsiblePlaybookTool::build_command(&args, &test_host_config()).unwrap();
         assert!(
             cmd.starts_with(
@@ -931,5 +956,227 @@ mod tests {
             json!({"host": "server1", "playbook": "site.yml", "become_user": "CORP\\"}),
         );
         assert!(AnsiblePlaybookTool::validate(&bad, &test_host_config()).is_err());
+    }
+
+    #[test]
+    fn test_unlisted_inventory_is_refused_with_the_allowed_values() {
+        let args = playbook_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "evil.example.com,"
+        }));
+        match AnsiblePlaybookTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'inventory': 'evil.example.com,' is not one of \
+                 hosts.server1.ansible.inventories ('hosts.ini', '/tmp/inv'). Ansible connects \
+                 to every host the inventory names, with the SSH credentials of the account on \
+                 this control host. Add it to hosts.server1.ansible.inventories in config.yaml, \
+                 or leave 'inventory' out to use the inventory set in ansible.cfg."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inventory_needs_an_exact_match() {
+        for value in [
+            "HOSTS.INI",
+            "hosts.ini ",
+            " hosts.ini",
+            "./hosts.ini",
+            "hosts.ini,x,",
+        ] {
+            let args = playbook_args(
+                json!({"host": "server1", "playbook": "site.yml", "inventory": value}),
+            );
+            assert!(
+                matches!(
+                    AnsiblePlaybookTool::validate(&args, &listed_host_config()),
+                    Err(BridgeError::CommandDenied { .. })
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_inventory_and_working_dir_are_refused_without_an_ansible_section() {
+        let inventory = playbook_args(
+            json!({"host": "server1", "playbook": "site.yml", "inventory": "hosts.ini"}),
+        );
+        match AnsiblePlaybookTool::validate(&inventory, &test_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'inventory': 'hosts.ini' cannot be used: no inventory is configured for \
+                 host 'server1' (hosts.server1.ansible.inventories is absent or empty), so a \
+                 call cannot name one. Ansible connects to every host the inventory names, with \
+                 the SSH credentials of the account on this control host. Add it to \
+                 hosts.server1.ansible.inventories in config.yaml, or leave 'inventory' out to \
+                 use the inventory set in ansible.cfg."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+        let dir = playbook_args(
+            json!({"host": "server1", "playbook": "site.yml", "working_dir": "/opt/a"}),
+        );
+        match AnsiblePlaybookTool::validate(&dir, &test_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.working_dirs"),
+                    "{reason}"
+                );
+                assert!(reason.contains("absent or empty"), "{reason}");
+            }
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_empty_lists_refuse_every_value() {
+        let config = HostConfig {
+            ansible: Some(crate::config::AnsibleHostConfig::default()),
+            ..test_host_config()
+        };
+        for field in ["inventory", "working_dir"] {
+            let mut value = json!({"host": "server1", "playbook": "site.yml"});
+            value[field] = json!("/opt/a");
+            assert!(
+                matches!(
+                    AnsiblePlaybookTool::validate(&playbook_args(value), &config),
+                    Err(BridgeError::CommandDenied { .. })
+                ),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unlisted_working_dir_is_refused_with_the_allowed_values() {
+        let args = playbook_args(json!({
+            "host": "server1", "playbook": "site.yml", "working_dir": "/tmp/evil"
+        }));
+        match AnsiblePlaybookTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'working_dir': '/tmp/evil' is not one of \
+                 hosts.server1.ansible.working_dirs ('/opt/a'). An ansible.cfg in that directory \
+                 sets the inventory, the remote user, the key and the plugin paths. Add it to \
+                 hosts.server1.ansible.working_dirs in config.yaml, or leave 'working_dir' out \
+                 and use absolute paths."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_listed_values_and_calls_without_them_keep_the_7_0_0_command() {
+        let listed = playbook_args(json!({
+            "host": "server1", "playbook": "site.yml", "inventory": "/tmp/inv",
+            "working_dir": "/opt/a", "callback": "json"
+        }));
+        assert!(AnsiblePlaybookTool::validate(&listed, &listed_host_config()).is_ok());
+        assert_eq!(
+            AnsiblePlaybookTool::build_command(&listed, &listed_host_config()).unwrap(),
+            "cd -- '/opt/a' && ANSIBLE_STDOUT_CALLBACK='json' \
+             ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml \
+             ansible-playbook 'site.yml' -i '/tmp/inv'"
+        );
+        let bare = playbook_args(json!({"host": "server1", "playbook": "site.yml"}));
+        assert!(AnsiblePlaybookTool::validate(&bare, &test_host_config()).is_ok());
+        assert_eq!(
+            AnsiblePlaybookTool::build_command(&bare, &test_host_config()).unwrap(),
+            "ansible-playbook 'site.yml'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unlisted_inventory_is_refused_through_the_handler() {
+        let handler = SshAnsiblePlaybookHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({"host": "server1", "playbook": "site.yml", "inventory": "x,"})),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.inventories"),
+                    "{reason}"
+                );
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_working_dir_needs_an_exact_match() {
+        let ok = playbook_args(
+            json!({"host": "server1", "playbook": "site.yml", "working_dir": "/opt/a"}),
+        );
+        assert!(AnsiblePlaybookTool::validate(&ok, &listed_host_config()).is_ok());
+        for value in [
+            "/opt/a/",
+            "/opt/a/.",
+            "/opt/./a",
+            "/opt/../opt/a",
+            "/opt/a/../a",
+            "//opt/a",
+            "/opt//a",
+            "/OPT/a",
+            "/opt/A",
+            "/opt/a ",
+            " /opt/a",
+            "opt/a",
+            "./opt/a",
+            "~/a",
+            "$HOME/a",
+            "/opt/a:/opt/b",
+            "/opt/ab",
+            "/opt",
+        ] {
+            let args = playbook_args(
+                json!({"host": "server1", "playbook": "site.yml", "working_dir": value}),
+            );
+            assert!(
+                matches!(
+                    AnsiblePlaybookTool::validate(&args, &listed_host_config()),
+                    Err(BridgeError::CommandDenied { .. })
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unlisted_working_dir_is_refused_through_the_handler() {
+        let handler = SshAnsiblePlaybookHandler::new();
+        let ctx = create_test_context_with_host();
+        let result = handler
+            .execute(
+                Some(json!({
+                    "host": "server1", "playbook": "site.yml", "working_dir": "/opt/a"
+                })),
+                &ctx,
+            )
+            .await;
+        match result.unwrap_err() {
+            BridgeError::CommandDenied { reason } => {
+                assert!(
+                    reason.contains("hosts.server1.ansible.working_dirs"),
+                    "{reason}"
+                );
+                assert!(reason.contains("absent or empty"), "{reason}");
+            }
+            e => panic!("Expected CommandDenied, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_schema_says_where_the_listed_values_live() {
+        let schema: serde_json::Value = serde_json::from_str(AnsiblePlaybookTool::SCHEMA).unwrap();
+        let text = |field: &str| schema["properties"][field]["description"].to_string();
+        assert!(text("inventory").contains("hosts.<host>.ansible.inventories"));
+        assert!(text("working_dir").contains("hosts.<host>.ansible.working_dirs"));
     }
 }

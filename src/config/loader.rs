@@ -189,6 +189,10 @@ pub fn validate_config(config: &Config) -> Result<()> {
             });
         }
 
+        if let Some(ansible) = &host.ansible {
+            validate_ansible_host(name, ansible)?;
+        }
+
         // Reject SSH-only auth types for WinRM/PSRP protocols
         #[cfg(any(feature = "winrm", feature = "psrp"))]
         validate_protocol_auth_compat(name, host)?;
@@ -277,6 +281,177 @@ pub fn validate_config(config: &Config) -> Result<()> {
     reject_settings_that_govern_nothing(config)?;
 
     Ok(())
+}
+
+/// The three lists of `hosts.<name>.ansible`, each with its own rules for an
+/// entry.
+#[derive(Clone, Copy)]
+enum AnsibleList {
+    Inventories,
+    RemoteUsers,
+    WorkingDirs,
+}
+
+impl AnsibleList {
+    const ALL: [Self; 3] = [Self::Inventories, Self::RemoteUsers, Self::WorkingDirs];
+
+    /// The YAML key.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Inventories => "inventories",
+            Self::RemoteUsers => "remote_users",
+            Self::WorkingDirs => "working_dirs",
+        }
+    }
+
+    fn entries(self, ansible: &super::types::AnsibleHostConfig) -> &[String] {
+        match self {
+            Self::Inventories => &ansible.inventories,
+            Self::RemoteUsers => &ansible.remote_users,
+            Self::WorkingDirs => &ansible.working_dirs,
+        }
+    }
+
+    /// Why `entry` is not acceptable in this list, or `None` when it is.
+    ///
+    /// The rules every list shares come first, then the ones of the list.
+    fn refusal(self, entry: &str) -> Option<String> {
+        use crate::domain::use_cases::ansible::AnsibleCommandBuilder;
+
+        if entry.is_empty() {
+            return Some("is empty".to_string());
+        }
+        if entry.chars().any(char::is_control) {
+            return Some("holds a control character".to_string());
+        }
+        if entry.starts_with('-') {
+            return Some("starts with '-', which Ansible would read as an option".to_string());
+        }
+        if AnsibleCommandBuilder::refuse_jinja(self.key(), entry).is_err() {
+            return Some("holds a Jinja delimiter ({{, {% or {#)".to_string());
+        }
+        match self {
+            Self::Inventories => inventory_entry_refusal(entry),
+            Self::RemoteUsers => AnsibleCommandBuilder::validate_user_name(self.key(), entry)
+                .err()
+                .map(|e| match e {
+                    BridgeError::CommandDenied { reason } => reason,
+                    other => other.to_string(),
+                }),
+            Self::WorkingDirs => directory_entry_refusal(entry),
+        }
+    }
+}
+
+/// Check the lists of `hosts.<name>.ansible`.
+///
+/// Each entry is matched against a call argument by exact string equality and
+/// then reaches a shell line on the control host, so an entry must itself be a
+/// value the Ansible tools would accept as an argument: not empty, no control
+/// character, no leading `-`, no Jinja delimiter. On top of that:
+/// - a `remote_users` entry must be a valid user name;
+/// - a `working_dirs` entry must be an absolute path without a `.` or `..`
+///   segment and without a trailing `/`;
+/// - an `inventories` entry holding `,` is a host list (no `/`); any other is
+///   a path, with the same rules as a working directory and, as Ansible
+///   expands `$VAR` and `~` in it, without `$` or `~`. See
+///   [`inventory_entry_refusal`].
+///
+/// # Errors
+///
+/// Returns [`BridgeError::ConfigInvalid`] naming `hosts.<name>.ansible.<key>`
+/// and the offending entry.
+fn validate_ansible_host(name: &str, ansible: &super::types::AnsibleHostConfig) -> Result<()> {
+    for list in AnsibleList::ALL {
+        for entry in list.entries(ansible) {
+            if let Some(reason) = list.refusal(entry) {
+                return Err(BridgeError::ConfigInvalid {
+                    field: format!("hosts.{name}.ansible.{}", list.key()),
+                    reason: format!("entry {entry:?} {reason}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What is wrong with a path that must name the same place whatever the
+/// current directory, and whose text is compared as it stands.
+#[derive(Clone, Copy)]
+enum PathFault {
+    NotAbsolute,
+    DotDotSegment,
+    DotSegment,
+    TrailingSlash,
+}
+
+impl PathFault {
+    /// The first fault of `path`, or `None` for an absolute path with no `.`
+    /// or `..` segment and no trailing `/`. A spelling such as `/a/.`, `/a/`
+    /// or `/a/../b` names a place the exact-match list would then miss or
+    /// the shell and Ansible would resolve differently.
+    fn of(path: &str) -> Option<Self> {
+        if !path.starts_with('/') {
+            Some(Self::NotAbsolute)
+        } else if path.split('/').any(|segment| segment == "..") {
+            Some(Self::DotDotSegment)
+        } else if path.split('/').any(|segment| segment == ".") {
+            Some(Self::DotSegment)
+        } else if path.ends_with('/') {
+            Some(Self::TrailingSlash)
+        } else {
+            None
+        }
+    }
+
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::NotAbsolute => "is not an absolute path",
+            Self::DotDotSegment => "holds a '..' segment",
+            Self::DotSegment => "holds a '.' segment",
+            Self::TrailingSlash => "ends with '/'",
+        }
+    }
+}
+
+/// Why `entry` of `ansible.working_dirs` is not acceptable, or `None`.
+fn directory_entry_refusal(entry: &str) -> Option<String> {
+    PathFault::of(entry).map(|fault| fault.reason().to_string())
+}
+
+/// Why `entry` of `ansible.inventories` is not acceptable, or `None`.
+///
+/// Ansible reads a value holding `,` as a host list, and does not resolve it
+/// to a path (`InventoryManager.parse_sources` and the CLI skip `unfrackpath`
+/// when `,` is in the value); the builders then enable only the `host_list`
+/// plugin, which refuses a value naming an existing file. Such an entry must
+/// not hold `/`: no host name does, and a path with a `,` in it would be read
+/// as a host list.
+///
+/// Any other entry is a path, which Ansible expands (`expandvars`,
+/// `expanduser`) and joins to the current directory: the working directory
+/// the call chose, or else the SSH login directory. So it must name one file
+/// whatever the directory: absolute, with no `$`, no `~`, no `.` or `..`
+/// segment and no trailing `/`. Otherwise it could resolve to a file the
+/// caller can create.
+fn inventory_entry_refusal(entry: &str) -> Option<String> {
+    if entry.contains(',') {
+        return entry.contains('/').then(|| {
+            "holds ',' so it is a host list, but also '/': a path cannot hold ','".to_string()
+        });
+    }
+    if entry.contains('$') {
+        return Some("holds '$', which Ansible expands in an inventory path".to_string());
+    }
+    if entry.contains('~') {
+        return Some("holds '~', which Ansible expands in an inventory path".to_string());
+    }
+    PathFault::of(entry).map(|fault| match fault {
+        PathFault::NotAbsolute => {
+            "has no ',' so it is a path, and a path must be absolute".to_string()
+        }
+        other => other.reason().to_string(),
+    })
 }
 
 const SANITIZE_CUSTOM_KEY: &str = "security.sanitize.custom_patterns";
@@ -1437,5 +1612,226 @@ sessions:
         };
         assert_eq!(field, "security.sanitize.custom_patterns[1]");
         assert!(!reason.contains("Invalid regex '"), "{reason}");
+    }
+
+    fn config_with_ansible(ansible: Option<crate::config::AnsibleHostConfig>) -> Config {
+        let yaml = r#"
+hosts:
+  ctl:
+    hostname: example.com
+    user: ops
+    auth:
+      type: agent
+"#;
+        let mut config: Config = crate::domain::yaml::parse_yaml(yaml).unwrap();
+        config.hosts.get_mut("ctl").unwrap().ansible = ansible;
+        config
+    }
+
+    #[test]
+    fn test_ansible_lists_load_and_default_to_absent() {
+        let yaml = r#"
+hosts:
+  ctl:
+    hostname: "192.168.1.1"
+    user: ops
+    auth:
+      type: agent
+    ansible:
+      inventories: ["/etc/ansible/hosts", "web1,web2,"]
+      remote_users: [deploy, "CORP\\svc"]
+      working_dirs: [/srv/ansible]
+  other:
+    hostname: "192.168.1.2"
+    user: ops
+    auth:
+      type: agent
+"#;
+        let mut file = secure_temp_file();
+        file.write_all(yaml.as_bytes()).unwrap();
+        let config = load_config(file.path()).unwrap();
+        let ansible = config.hosts["ctl"].ansible.as_ref().expect("ansible block");
+        assert_eq!(ansible.inventories, ["/etc/ansible/hosts", "web1,web2,"]);
+        assert_eq!(ansible.remote_users, ["deploy", "CORP\\svc"]);
+        assert_eq!(ansible.working_dirs, ["/srv/ansible"]);
+        assert!(config.hosts["other"].ansible.is_none());
+    }
+
+    #[test]
+    fn test_ansible_block_rejects_unknown_keys() {
+        let yaml = r#"
+hosts:
+  ctl:
+    hostname: "192.168.1.1"
+    user: ops
+    auth:
+      type: agent
+    ansible:
+      inventory: [/etc/ansible/hosts]
+"#;
+        let mut file = secure_temp_file();
+        file.write_all(yaml.as_bytes()).unwrap();
+        assert!(load_config(file.path()).is_err());
+    }
+
+    #[test]
+    fn test_ansible_entries_that_a_call_could_not_use_are_refused() {
+        for (key, entry) in [
+            ("inventories", ""),
+            ("inventories", "-i"),
+            ("inventories", "hosts\n"),
+            ("inventories", "{{ lookup('pipe','id') }}"),
+            ("inventories", "a{%b"),
+            // A path (no ',') must be absolute and plain.
+            ("inventories", "hosts.ini"),
+            ("inventories", "./hosts.ini"),
+            ("inventories", "~/hosts.ini"),
+            ("inventories", "/home/ops/~/hosts.ini"),
+            ("inventories", "$HOME/hosts.ini"),
+            ("inventories", "/srv/${ENV}/hosts.ini"),
+            ("inventories", "/srv/ansible/"),
+            ("inventories", "/srv/ansible/."),
+            ("inventories", "/srv/./hosts.ini"),
+            ("inventories", "/srv/../etc/hosts.ini"),
+            // A host list (',') cannot hold a path.
+            ("inventories", "web1,/tmp/inv,"),
+            ("inventories", "./-hosts,"),
+            ("remote_users", ""),
+            ("remote_users", "root; id"),
+            ("remote_users", "-u"),
+            ("remote_users", "$(id)"),
+            ("remote_users", "{{ x }}"),
+            ("working_dirs", ""),
+            ("working_dirs", "srv/ansible"),
+            ("working_dirs", "~/ansible"),
+            ("working_dirs", "/srv/../etc"),
+            ("working_dirs", "/srv/ansible/.."),
+            ("working_dirs", "/srv/ansible/"),
+            ("working_dirs", "/srv/ansible/."),
+            ("working_dirs", "/srv/./ansible"),
+            ("working_dirs", "./ansible"),
+            ("working_dirs", "/"),
+            ("working_dirs", "/srv/a\tb"),
+            ("working_dirs", "{{ x }}"),
+        ] {
+            let list = vec![entry.to_string()];
+            let ansible = match key {
+                "inventories" => crate::config::AnsibleHostConfig {
+                    inventories: list,
+                    ..Default::default()
+                },
+                "remote_users" => crate::config::AnsibleHostConfig {
+                    remote_users: list,
+                    ..Default::default()
+                },
+                _ => crate::config::AnsibleHostConfig {
+                    working_dirs: list,
+                    ..Default::default()
+                },
+            };
+            match validate_config(&config_with_ansible(Some(ansible))) {
+                Err(BridgeError::ConfigInvalid { field, reason }) => {
+                    assert_eq!(field, format!("hosts.ctl.ansible.{key}"), "{entry:?}");
+                    assert!(reason.starts_with("entry "), "{entry:?}: {reason}");
+                }
+                other => panic!("{key} {entry:?}: expected ConfigInvalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_ansible_entries_a_call_could_use_are_accepted() {
+        let ansible = crate::config::AnsibleHostConfig {
+            inventories: [
+                "/etc/ansible/hosts",
+                "/etc/ansible/inventory.d",
+                "web1,web2,",
+                "10.0.0.1,",
+                "web1:2222,",
+                "/srv/my..dir/hosts.ini",
+            ]
+            .map(String::from)
+            .to_vec(),
+            remote_users: ["deploy", "deploy.ops@corp-1", "CORP\\svc", "svc$"]
+                .map(String::from)
+                .to_vec(),
+            working_dirs: ["/srv/ansible", "/srv/my..dir", "/srv/.hidden"]
+                .map(String::from)
+                .to_vec(),
+        };
+        validate_config(&config_with_ansible(Some(ansible))).unwrap();
+        let empty = crate::config::AnsibleHostConfig::default();
+        validate_config(&config_with_ansible(Some(empty))).unwrap();
+        validate_config(&config_with_ansible(None)).unwrap();
+    }
+
+    #[test]
+    fn test_ansible_entry_refusals_say_which_rule_failed() {
+        use AnsibleList::{Inventories, WorkingDirs};
+        for (list, entry, reason) in [
+            (
+                Inventories,
+                "hosts.ini",
+                "has no ',' so it is a path, and a path must be absolute",
+            ),
+            (
+                Inventories,
+                "~/hosts.ini",
+                "holds '~', which Ansible expands in an inventory path",
+            ),
+            (
+                Inventories,
+                "$HOME/hosts.ini",
+                "holds '$', which Ansible expands in an inventory path",
+            ),
+            (Inventories, "/srv/a/", "ends with '/'"),
+            (Inventories, "/srv/./a", "holds a '.' segment"),
+            (Inventories, "/srv/../a", "holds a '..' segment"),
+            (
+                Inventories,
+                "web1,/tmp/inv,",
+                "holds ',' so it is a host list, but also '/': a path cannot hold ','",
+            ),
+            (WorkingDirs, "srv", "is not an absolute path"),
+            (WorkingDirs, "/srv/.", "holds a '.' segment"),
+            (WorkingDirs, "/srv/", "ends with '/'"),
+        ] {
+            assert_eq!(list.refusal(entry).as_deref(), Some(reason), "{entry}");
+        }
+    }
+
+    #[test]
+    fn test_load_config_refuses_a_bad_ansible_entry() {
+        for (key, entry) in [
+            ("inventories", "hosts.ini"),
+            ("inventories", "$HOME/hosts.ini"),
+            ("working_dirs", "/srv/ansible/"),
+            ("remote_users", "root;id"),
+        ] {
+            let yaml = format!(
+                r#"
+hosts:
+  ctl:
+    hostname: "192.168.1.1"
+    user: ops
+    auth:
+      type: agent
+    ansible:
+      {key}: ["{entry}"]
+"#
+            );
+            let mut file = secure_temp_file();
+            file.write_all(yaml.as_bytes()).unwrap();
+            match load_config(file.path()) {
+                Err(BridgeError::ConfigInvalid { field, reason }) => {
+                    assert_eq!(field, format!("hosts.ctl.ansible.{key}"));
+                    assert!(
+                        reason.starts_with(&format!("entry {entry:?} ")),
+                        "{key}: {reason}"
+                    );
+                }
+                other => panic!("{key} {entry:?}: expected ConfigInvalid, got {other:?}"),
+            }
+        }
     }
 }

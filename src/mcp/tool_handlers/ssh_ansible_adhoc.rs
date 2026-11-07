@@ -96,7 +96,7 @@ impl StandardTool for AnsibleAdhocTool {
             },
             "inventory": {
                 "type": "string",
-                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'"
+                "description": "Inventory file, directory or comma-separated host list. Read as data (host list, YAML, INI, TOML), never executed; must not start with '-'. Must be listed in hosts.<host>.ansible.inventories in config.yaml (exact match); leave it out to use the inventory set in ansible.cfg"
             },
             "become": {
                 "type": "boolean",
@@ -108,7 +108,7 @@ impl StandardTool for AnsibleAdhocTool {
             },
             "user": {
                 "type": "string",
-                "description": "Remote SSH user (letters, digits, '_', '.', '@', '-'; max 64; no leading '-'; optional DOMAIN\\ prefix and trailing '$')"
+                "description": "Remote SSH user (letters, digits, '_', '.', '@', '-'; max 64; no leading '-'; optional DOMAIN\\ prefix and trailing '$'). Must be listed in hosts.<host>.ansible.remote_users in config.yaml (exact match); leave it out to use remote_user from ansible.cfg or the inventory"
             },
             "forks": {
                 "type": "integer",
@@ -169,7 +169,7 @@ impl StandardTool for AnsibleAdhocTool {
         ))
     }
 
-    fn validate(args: &SshAnsibleAdhocArgs, _host_config: &HostConfig) -> Result<()> {
+    fn validate(args: &SshAnsibleAdhocArgs, host_config: &HostConfig) -> Result<()> {
         AnsibleCommandBuilder::validate_pattern(&args.pattern)?;
         AnsibleCommandBuilder::validate_adhoc_module(&args.module, args.args.as_deref())?;
         // Ansible templates these on the control host (the SSH host): a
@@ -181,6 +181,11 @@ impl StandardTool for AnsibleAdhocTool {
         ])?;
         if let Some(inventory) = args.inventory.as_deref() {
             AnsibleCommandBuilder::validate_inventory(inventory)?;
+            AnsibleCommandBuilder::validate_inventory_choice(
+                &args.host,
+                inventory,
+                host_config.ansible_inventories(),
+            )?;
         }
         AnsibleCommandBuilder::validate_vault_args(
             args.vault_password_file.as_deref(),
@@ -195,6 +200,11 @@ impl StandardTool for AnsibleAdhocTool {
         }
         if let Some(user) = args.user.as_deref() {
             AnsibleCommandBuilder::validate_user_name("user", user)?;
+            AnsibleCommandBuilder::validate_remote_user_choice(
+                &args.host,
+                user,
+                host_config.ansible_remote_users(),
+            )?;
         }
         Ok(())
     }
@@ -476,6 +486,27 @@ mod tests {
 
             #[cfg(feature = "winrm")]
             winrm_max_envelope_size: None,
+            ansible: None,
+        }
+    }
+
+    /// `test_host_config()` with the inventories and remote users the tests name.
+    fn listed_host_config() -> HostConfig {
+        HostConfig {
+            ansible: Some(crate::config::AnsibleHostConfig {
+                inventories: vec!["hosts.ini".to_string(), "/tmp/inv".to_string()],
+                remote_users: [
+                    "deploy",
+                    "deploy.ops@corp-1",
+                    "CORP\\svc",
+                    "svc$",
+                    "corp.example.com\\gmsa-web$",
+                ]
+                .map(String::from)
+                .to_vec(),
+                ..Default::default()
+            }),
+            ..test_host_config()
         }
     }
 
@@ -750,7 +781,7 @@ mod tests {
             let mut value = json!({"host": "server1", "pattern": "all", "module": "ping"});
             value[field] = json!("deploy.ops@corp-1");
             let ok = adhoc_args(value);
-            assert!(AnsibleAdhocTool::validate(&ok, &test_host_config()).is_ok());
+            assert!(AnsibleAdhocTool::validate(&ok, &listed_host_config()).is_ok());
         }
     }
 
@@ -771,7 +802,7 @@ mod tests {
             "host": "server1", "pattern": "web*:!db1", "module": "ansible.builtin.ping",
             "inventory": "hosts.ini"
         }));
-        assert!(AnsibleAdhocTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsibleAdhocTool::validate(&ok, &listed_host_config()).is_ok());
     }
 
     #[tokio::test]
@@ -816,7 +847,7 @@ mod tests {
             "host": "server1", "pattern": "all", "module": "service",
             "args": "name=nginx state=restarted", "become_user": "root", "user": "deploy"
         }));
-        assert!(AnsibleAdhocTool::validate(&ok, &test_host_config()).is_ok());
+        assert!(AnsibleAdhocTool::validate(&ok, &listed_host_config()).is_ok());
     }
 
     #[tokio::test]
@@ -973,7 +1004,7 @@ mod tests {
                 value[field] = json!(name);
                 let ok = adhoc_args(value);
                 assert!(
-                    AnsibleAdhocTool::validate(&ok, &test_host_config()).is_ok(),
+                    AnsibleAdhocTool::validate(&ok, &listed_host_config()).is_ok(),
                     "{field} {name}"
                 );
             }
@@ -987,5 +1018,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_unlisted_inventory_is_refused_with_the_allowed_values() {
+        let args = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping",
+            "inventory": "evil.example.com,"
+        }));
+        match AnsibleAdhocTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'inventory': 'evil.example.com,' is not one of \
+                 hosts.server1.ansible.inventories ('hosts.ini', '/tmp/inv'). Ansible connects \
+                 to every host the inventory names, with the SSH credentials of the account on \
+                 this control host. Add it to hosts.server1.ansible.inventories in config.yaml, \
+                 or leave 'inventory' out to use the inventory set in ansible.cfg."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unlisted_user_is_refused_with_the_allowed_values() {
+        let args = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping", "user": "root"
+        }));
+        match AnsibleAdhocTool::validate(&args, &listed_host_config()) {
+            Err(BridgeError::CommandDenied { reason }) => assert_eq!(
+                reason,
+                "Invalid 'user': 'root' is not one of hosts.server1.ansible.remote_users \
+                 ('deploy', 'deploy.ops@corp-1', 'CORP\\svc', 'svc$', \
+                 'corp.example.com\\gmsa-web$'). Ansible logs in to every target as this user, \
+                 with the SSH credentials of the account on this control host. Add it to \
+                 hosts.server1.ansible.remote_users in config.yaml, or leave 'user' out to use \
+                 remote_user from ansible.cfg or the inventory."
+            ),
+            other => panic!("expected CommandDenied, got {other:?}"),
+        }
+        // An exact match only: case and surrounding spaces count.
+        for name in ["Deploy", "deploy ", "DEPLOY"] {
+            let args = adhoc_args(json!({
+                "host": "server1", "pattern": "all", "module": "ping", "user": name
+            }));
+            assert!(
+                AnsibleAdhocTool::validate(&args, &listed_host_config()).is_err(),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_become_user_is_not_an_operator_choice() {
+        let args = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping", "become_user": "root"
+        }));
+        assert!(AnsibleAdhocTool::validate(&args, &test_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_inventory_and_user_are_refused_without_an_ansible_section() {
+        for (field, value, key) in [
+            ("inventory", "hosts.ini", "inventories"),
+            ("user", "deploy", "remote_users"),
+        ] {
+            let mut v = json!({"host": "server1", "pattern": "all", "module": "ping"});
+            v[field] = json!(value);
+            match AnsibleAdhocTool::validate(&adhoc_args(v), &test_host_config()) {
+                Err(BridgeError::CommandDenied { reason }) => {
+                    assert!(
+                        reason.contains(&format!("hosts.server1.ansible.{key}")),
+                        "{reason}"
+                    );
+                    assert!(reason.contains("absent or empty"), "{reason}");
+                }
+                other => panic!("{field}: expected CommandDenied, got {other:?}"),
+            }
+        }
+        let bare = adhoc_args(json!({"host": "server1", "pattern": "all", "module": "ping"}));
+        assert!(AnsibleAdhocTool::validate(&bare, &test_host_config()).is_ok());
+    }
+
+    #[test]
+    fn test_listed_values_keep_the_7_0_0_command() {
+        let args = adhoc_args(json!({
+            "host": "server1", "pattern": "all", "module": "ping",
+            "inventory": "/tmp/inv", "user": "deploy"
+        }));
+        assert!(AnsibleAdhocTool::validate(&args, &listed_host_config()).is_ok());
+        assert_eq!(
+            AnsibleAdhocTool::build_command(&args, &listed_host_config()).unwrap(),
+            "ANSIBLE_INVENTORY_ENABLED=host_list,yaml,ini,toml \
+             ansible 'all' -m 'ping' -i '/tmp/inv' -u 'deploy'"
+        );
+    }
+
+    #[test]
+    fn test_schema_says_where_the_listed_values_live() {
+        let schema: serde_json::Value = serde_json::from_str(AnsibleAdhocTool::SCHEMA).unwrap();
+        let text = |field: &str| schema["properties"][field]["description"].to_string();
+        assert!(text("inventory").contains("hosts.<host>.ansible.inventories"));
+        assert!(text("user").contains("hosts.<host>.ansible.remote_users"));
     }
 }
